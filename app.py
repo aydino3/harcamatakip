@@ -622,6 +622,16 @@ def _apply_pg_schema(db):
                 db._conn.commit()
             except Exception:
                 db._conn.rollback()
+    db._conn.cursor().execute(
+        "CREATE TABLE IF NOT EXISTS auth_rate_limit_events "
+        "(source_hash TEXT NOT NULL, scope TEXT NOT NULL, "
+        "occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    db._conn.cursor().execute(
+        "CREATE INDEX IF NOT EXISTS auth_rate_limit_events_window "
+        "ON auth_rate_limit_events(source_hash,scope,occurred_at)"
+    )
+    db._conn.commit()
 
 
 def _migrate_income_daily_frequency(db):
@@ -1039,18 +1049,8 @@ def reserve_auth_attempt(address: str, scope: str, identity: str = "") -> bool:
         db.execute("BEGIN IMMEDIATE")
         rate_limit_table = "auth_failures"
         if configured_database_url():
-            # Keep the PostgreSQL throttle in its own versioned table. Older
-            # deployments may have an incompatible auth_failures relation.
+            # Older deployments may have an incompatible auth_failures relation.
             rate_limit_table = "auth_rate_limit_events"
-            db._conn.cursor().execute(
-                "CREATE TABLE IF NOT EXISTS auth_rate_limit_events "
-                "(source_hash TEXT NOT NULL, scope TEXT NOT NULL, "
-                "occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)"
-            )
-            db._conn.cursor().execute(
-                "CREATE INDEX IF NOT EXISTS auth_rate_limit_events_window "
-                "ON auth_rate_limit_events(source_hash,scope,occurred_at)"
-            )
         db.execute(f"DELETE FROM {rate_limit_table} WHERE occurred_at<datetime('now','-1 day')")
         count = db.execute(f"SELECT COUNT(*) FROM {rate_limit_table} WHERE source_hash=? AND scope=? AND occurred_at>=datetime('now','-15 minutes')", (source_hash, scope)).fetchone()[0]
         if count >= limit:
