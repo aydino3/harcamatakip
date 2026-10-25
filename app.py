@@ -624,8 +624,22 @@ def _apply_pg_schema(db):
                 db._conn.rollback()
     db._conn.cursor().execute(
         "CREATE TABLE IF NOT EXISTS auth_rate_limit_events "
-        "(source_hash TEXT NOT NULL, scope TEXT NOT NULL, "
+        "(source_hash TEXT, scope TEXT, "
         "occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    # Heal partially initialized tables from earlier deploys without touching
+    # user data or relying on CREATE TABLE IF NOT EXISTS to upgrade a relation.
+    db._conn.cursor().execute(
+        "ALTER TABLE auth_rate_limit_events "
+        "ADD COLUMN IF NOT EXISTS source_hash TEXT"
+    )
+    db._conn.cursor().execute(
+        "ALTER TABLE auth_rate_limit_events "
+        "ADD COLUMN IF NOT EXISTS scope TEXT"
+    )
+    db._conn.cursor().execute(
+        "ALTER TABLE auth_rate_limit_events "
+        "ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"
     )
     db._conn.cursor().execute(
         "CREATE INDEX IF NOT EXISTS auth_rate_limit_events_window "
