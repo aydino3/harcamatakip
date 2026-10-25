@@ -17,13 +17,13 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-# The Supabase Vercel Marketplace integration provides POSTGRES_URL (the
-# serverless-compatible pooler URL). Prefer it over a manually added
-# DATABASE_URL, which is often Supabase's IPv6-only direct connection.
-# When it is absent we fall back to the original SQLite path (local dev).
+# An explicit application URL takes priority during database migrations.
+# Marketplace POSTGRES_URL remains the pooler-compatible default; DATABASE_URL
+# is the final PostgreSQL fallback before local SQLite development storage.
 def configured_database_url() -> str | None:
     return (
-        os.environ.get("POSTGRES_URL", "").strip()
+        os.environ.get("EXPENSE_DATABASE_URL", "").strip()
+        or os.environ.get("POSTGRES_URL", "").strip()
         or os.environ.get("DATABASE_URL", "").strip()
         or None
     )
