@@ -270,9 +270,6 @@ def validate_runtime_configuration():
             except PermissionError:
                 pass
         DB_PATH, BACKUP_DIR = candidate, backup_path
-        port = os.environ.get("PORT", "10000")
-        if not port.isdigit() or not 1 <= int(port) <= 65535:
-            raise ValueError("PORT must be a valid TCP port number.")
         private_beta_enabled(strict=True)
         return True
 

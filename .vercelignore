@@ -1,0 +1,17 @@
+__pycache__
+.pytest_cache
+.python-version
+.git
+.gitignore
+*.pyc
+tests/
+docs/
+data/
+render.yaml
+production.py
+wsgi.py
+package.json
+package-lock.json
+README.md
+AGENTS.md
+17 Ekim Güncel EXCEL.xlsx

@@ -1,4 +1,13 @@
 import os
+import sys
+from pathlib import Path
+
+# Ensure the project root is on sys.path so that `webapp` and `app` resolve
+# correctly regardless of which directory Vercel invokes the function from.
+_HERE = Path(__file__).resolve().parent          # .../api/
+_ROOT = _HERE.parent                             # project root
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 os.environ.setdefault("APP_ENV", "production")
 os.environ.setdefault("VERCEL", "1")
@@ -8,6 +17,6 @@ os.environ.setdefault("TRUST_PROXY", "1")
 os.environ.setdefault("EXPENSE_DB_PATH", "/tmp/expense-tracker.sqlite3")
 os.environ.setdefault("EXPENSE_BACKUP_DIR", "/tmp/expense-tracker-backups")
 
-from webapp import create_app
+from webapp import create_app  # noqa: E402
 
 app = create_app()
