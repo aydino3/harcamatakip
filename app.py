@@ -623,27 +623,27 @@ def _apply_pg_schema(db):
             except Exception:
                 db._conn.rollback()
     db._conn.cursor().execute(
-        "CREATE TABLE IF NOT EXISTS auth_rate_limit_events "
+        "CREATE TABLE IF NOT EXISTS auth_attempt_windows_v2 "
         "(source_hash TEXT, scope TEXT, "
         "occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     )
     # Heal partially initialized tables from earlier deploys without touching
     # user data or relying on CREATE TABLE IF NOT EXISTS to upgrade a relation.
     db._conn.cursor().execute(
-        "ALTER TABLE auth_rate_limit_events "
+        "ALTER TABLE auth_attempt_windows_v2 "
         "ADD COLUMN IF NOT EXISTS source_hash TEXT"
     )
     db._conn.cursor().execute(
-        "ALTER TABLE auth_rate_limit_events "
+        "ALTER TABLE auth_attempt_windows_v2 "
         "ADD COLUMN IF NOT EXISTS scope TEXT"
     )
     db._conn.cursor().execute(
-        "ALTER TABLE auth_rate_limit_events "
+        "ALTER TABLE auth_attempt_windows_v2 "
         "ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"
     )
     db._conn.cursor().execute(
-        "CREATE INDEX IF NOT EXISTS auth_rate_limit_events_window "
-        "ON auth_rate_limit_events(source_hash,scope,occurred_at)"
+        "CREATE INDEX IF NOT EXISTS auth_attempt_windows_v2_window "
+        "ON auth_attempt_windows_v2(source_hash,scope,occurred_at)"
     )
     db._conn.commit()
 
@@ -1064,7 +1064,7 @@ def reserve_auth_attempt(address: str, scope: str, identity: str = "") -> bool:
         rate_limit_table = "auth_failures"
         if configured_database_url():
             # Older deployments may have an incompatible auth_failures relation.
-            rate_limit_table = "auth_rate_limit_events"
+            rate_limit_table = "auth_attempt_windows_v2"
         if configured_database_url():
             # Use Python-generated bounds so this works with PostgreSQL timestamps
             # and SQLite's text timestamps without relying on SQLite datetime().
