@@ -632,6 +632,14 @@ def _apply_pg_schema(db):
             expires_at TEXT NOT NULL
         )"""
     )
+    # Heal partially provisioned relations left by earlier startup failures.
+    for statement in (
+        "ALTER TABLE auth_sessions_v2 ADD COLUMN IF NOT EXISTS token_hash TEXT",
+        "ALTER TABLE auth_sessions_v2 ADD COLUMN IF NOT EXISTS user_id BIGINT",
+        "ALTER TABLE auth_sessions_v2 ADD COLUMN IF NOT EXISTS csrf_token TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE auth_sessions_v2 ADD COLUMN IF NOT EXISTS expires_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'",
+    ):
+        db._conn.cursor().execute(statement)
     db._conn.commit()
 
 
