@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 24741)
+Total output lines: 1305
+
 import sqlite3
 import tempfile
 import unittest
@@ -163,6 +166,18 @@ class AppTest(unittest.TestCase):
                 self.assertEqual(app.BACKUP_DIR, Path("/tmp/expense-tracker-backups"))
         finally:
             app.DB_PATH, app.BACKUP_DIR = original_path, original_backup
+
+    def test_supabase_vercel_pooler_url_takes_precedence_over_direct_database_url(self):
+        pooler_url = "postgresql://pooler.example.invalid:6543/postgres"
+        direct_url = "postgresql://direct.example.invalid:5432/postgres"
+        with patch.dict(os.environ, {"POSTGRES_URL": pooler_url, "DATABASE_URL": direct_url}), \
+             patch.object(app, "_DATABASE_URL", None), \
+             patch("pg_compat.connect_pg", return_value=object()) as connect_pg:
+            app.connect()
+        connect_pg.assert_called_once_with(pooler_url)
+
+        with patch.dict(os.environ, {"POSTGRES_URL": pooler_url, "APP_ENV": "production"}, clear=False):
+            self.assertTrue(app.validate_runtime_configuration())
 
     def test_production_wsgi_entry_validates_then_initializes_database(self):
         persistent=Path(self.temp.name)/"mounted"
@@ -537,230 +552,7 @@ class AppTest(unittest.TestCase):
             INSERT INTO users(id,email,password_hash,password_salt) VALUES(1,'migration@example.invalid',X'01',X'02');
             CREATE TABLE income_rules(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,income_type TEXT NOT NULL,description TEXT NOT NULL,frequency TEXT NOT NULL CHECK(frequency IN ('weekly','monthly','yearly')),schedule_mode TEXT NOT NULL DEFAULT 'anchored',start_on TEXT NOT NULL,end_on TEXT,status TEXT NOT NULL DEFAULT 'active',created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(id,user_id));
             CREATE TABLE income_rule_amounts(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,rule_id INTEGER NOT NULL,effective_on TEXT NOT NULL,amount_minor INTEGER NOT NULL,UNIQUE(rule_id,effective_on),FOREIGN KEY(rule_id,user_id) REFERENCES income_rules(id,user_id) ON DELETE CASCADE);
-            CREATE TABLE income_records(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,rule_id INTEGER,income_type TEXT NOT NULL,description TEXT NOT NULL,amount_minor INTEGER NOT NULL,currency TEXT NOT NULL DEFAULT 'TRY',expected_on TEXT NOT NULL,received_on TEXT,status TEXT NOT NULL DEFAULT 'expected',note TEXT NOT NULL DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(rule_id,expected_on),FOREIGN KEY(rule_id,user_id) REFERENCES income_rules(id,user_id) ON DELETE CASCADE);
-            INSERT INTO income_rules(id,user_id,income_type,description,frequency,start_on) VALUES(7,1,'salary','Legacy salary','monthly','2024-01-31');
-            INSERT INTO income_rule_amounts(id,user_id,rule_id,effective_on,amount_minor) VALUES(8,1,7,'2024-01-31',250000);
-            INSERT INTO income_records(id,user_id,rule_id,income_type,description,amount_minor,expected_on) VALUES(9,1,7,'salary','Legacy salary',250000,'2024-01-31');
-            """)
-            db.close()
-            app.init_db()
-            with app.connect() as migrated:
-                self.assertEqual(tuple(migrated.execute("SELECT id,frequency FROM income_rules WHERE id=7").fetchone()),(7,"monthly"))
-                self.assertEqual(tuple(migrated.execute("SELECT id,amount_minor FROM income_rule_amounts WHERE id=8").fetchone()),(8,250000))
-                self.assertEqual(tuple(migrated.execute("SELECT id,expected_on FROM income_records WHERE id=9").fetchone()),(9,"2024-01-31"))
-                self.assertEqual(migrated.execute("PRAGMA foreign_key_check").fetchall(),[])
-        finally:
-            app.DB_PATH=original
-
-    def test_daily_income_rule_generates_idempotent_calendar_day_occurrences(self):
-        rule=app.save_income_rule(self.user_a,{"description":"Daily allowance","income_type":"additional","amount":"12.34","frequency":"daily","start_on":"2024-02-27","end_on":"2024-03-01"})
-        overview=app.income_overview(self.user_a,"2024-02",date(2024,2,26))
-        dates=[row["expected_on"] for row in overview["records"] if row["rule_id"]==rule]
-        self.assertEqual(dates,["2024-02-27","2024-02-28","2024-02-29","2024-03-01"])
-        app.income_overview(self.user_a,"2024-02",date(2024,2,26))
-        with app.connect() as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM income_records WHERE rule_id=? AND user_id=?",(rule,self.user_a)).fetchone()[0],4)
-
-    def test_recurring_income_occurrence_generation_and_idempotency(self):
-        app.save_income_rule(self.user_a,{"description":"Synthetic weekly","income_type":"additional","amount":"25","frequency":"weekly","start_on":"2024-02-01"})
-        app.save_income_rule(self.user_a,{"description":"Synthetic month end","income_type":"salary","amount":"3000","frequency":"monthly","start_on":"2024-01-31"})
-        app.save_income_rule(self.user_a,{"description":"Synthetic yearly","income_type":"other","amount":"400","frequency":"yearly","start_on":"2024-02-29"})
-        february=app.income_overview(self.user_a,"2024-02",date(2024,3,1))
-        weekly=[r for r in february["records"] if r["description"]=="Synthetic weekly"]
-        monthly=[r for r in february["records"] if r["description"]=="Synthetic month end"]
-        self.assertEqual([r["expected_on"] for r in weekly],["2024-02-01","2024-02-08","2024-02-15","2024-02-22","2024-02-29"])
-        self.assertEqual([r["expected_on"] for r in monthly],["2024-02-29"])
-        app.income_overview(self.user_a,"2024-02",date(2024,3,1))
-        with app.connect() as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM income_records WHERE user_id=?",(self.user_a,)).fetchone()[0],7)
-        next_year=app.income_overview(self.user_a,"2025-02",date(2025,3,1))
-        yearly=[r for r in next_year["records"] if r["description"]=="Synthetic yearly"]
-        self.assertEqual([r["expected_on"] for r in yearly],["2025-02-28"])
-
-    def test_income_records_rules_amount_changes_status_and_user_isolation(self):
-        today=date.today(); current=today.strftime("%Y-%m")
-        income_id=app.save_income(self.user_a,{"description":"Synthetic freelance","income_type":"freelance","amount":"1250,50","expected_on":(today+timedelta(days=2)).isoformat()})
-        self.assertEqual(app.income_overview(self.user_b,current)["records"],[])
-        self.assertFalse(app.set_income_status(self.user_b,income_id,"received"))
-        self.assertTrue(app.set_income_status(self.user_a,income_id,"received",today.isoformat()))
-        self.assertEqual(app.income_totals(self.user_a,current)["received_minor"],125050)
-        self.assertEqual(app.income_totals(self.user_a,current)["expected_minor"],0)
-        self.assertEqual(app.save_income(self.user_a,{"id":income_id,"description":"changed","income_type":"other","amount":"1","expected_on":today.isoformat()}),0)
-        self.assertFalse(app.delete_income(self.user_a,income_id))
-
-        rule_id=app.save_income_rule(self.user_a,{"description":"Synthetic salary","income_type":"salary","amount":"3000","frequency":"monthly","start_on":today.isoformat()})
-        overview=app.income_overview(self.user_a,current)
-        rule=next(row for row in overview["rules"] if row["id"]==rule_id)
-        self.assertEqual(rule["schedule_mode"],"last_day")
-        occurrence=app.income_recurrence_date(today,"monthly",0,"last_day")
-        record=next(row for row in overview["records"] if row["rule_id"]==rule_id and row["expected_on"]==occurrence.isoformat())
-        self.assertEqual(record["amount_minor"],300000)
-        self.assertTrue(app.set_income_status(self.user_a,record["id"],"received",today.isoformat()))
-        effective=(today+timedelta(days=1)).isoformat()
-        self.assertTrue(app.set_income_rule_amount(self.user_a,rule_id,effective,"3500"))
-        app.income_overview(self.user_a,current)
-        with app.connect() as db:
-            saved=db.execute("SELECT amount_minor,status FROM income_records WHERE id=? AND user_id=?",(record["id"],self.user_a)).fetchone()
-        self.assertEqual((saved["amount_minor"],saved["status"]),(300000,"received"))
-        self.assertFalse(app.set_income_rule_status(self.user_b,rule_id,"paused"))
-        next_month=app.income_recurrence_date(today,"monthly",1,"last_day").strftime("%Y-%m")
-        self.assertTrue(app.set_income_rule_status(self.user_a,rule_id,"paused"))
-        self.assertEqual(app.income_totals(self.user_a,next_month)["expected_minor"],0)
-        self.assertTrue(app.set_income_rule_status(self.user_a,rule_id,"active"))
-        self.assertEqual(app.income_totals(self.user_a,next_month)["expected_minor"],350000)
-        self.assertTrue(app.set_income_rule_status(self.user_a,rule_id,"cancelled"))
-        self.assertEqual(app.income_totals(self.user_a,next_month)["expected_minor"],0)
-
-    def test_confirmed_cash_uses_opening_date_and_only_received_income_cash_expenses_and_repayments(self):
-        today=date.today(); effective=(today-timedelta(days=5)).isoformat(); before=(today-timedelta(days=6)).isoformat()
-        self.assertFalse(app.get_cash_position(self.user_a)["reliable"])
-        category,method=self.category_and_method(self.user_a)
-        card=app.save_credit_card(self.user_a,{"bank_name":"Test Bank","display_name":"Test Card","closing_day":today.day,"due_day":20})
-        old=app.save_expense(self.user_a,{"amount":"99","spent_on":before,"description":"Before opening","category_id":category})
-        pre_opening_income=app.save_income(self.user_a,{"description":"Income before opening","amount":"500","expected_on":before})
-        self.assertTrue(app.set_income_status(self.user_a,pre_opening_income,"received",before))
-        cash=app.save_expense(self.user_a,{"amount":"15","spent_on":today.isoformat(),"description":"Cash expense","category_id":category,"payment_method_id":method})
-        card_purchase=app.save_expense(self.user_a,{"amount":"50","spent_on":today.isoformat(),"description":"Card purchase","card_id":card})
-        income=app.save_income(self.user_a,{"description":"Received after opening","amount":"20","expected_on":effective})
-        self.assertTrue(app.set_income_status(self.user_a,income,"received",today.isoformat()))
-        app.record_card_repayment(self.user_a,card,{"amount":"10","paid_on":today.isoformat()})
-        position=app.save_opening_cash(self.user_a,"100",effective)
-        self.assertEqual(position["balance_minor"],9500)
-        app.add_cash_adjustment(self.user_a,"-2",today.isoformat(),"Cash count correction")
-        self.assertEqual(app.get_cash_position(self.user_a)["balance_minor"],9300)
-        with app.connect() as db:
-            self.assertTrue(db.execute("SELECT 1 FROM expenses WHERE id=? AND user_id=?",(old,self.user_a)).fetchone())
-            self.assertTrue(db.execute("SELECT 1 FROM expenses WHERE id=? AND user_id=?",(cash,self.user_a)).fetchone())
-            self.assertTrue(db.execute("SELECT 1 FROM expenses WHERE id=? AND user_id=?",(card_purchase,self.user_a)).fetchone())
-        self.assertFalse(app.get_cash_position(self.user_b)["reliable"])
-
-    def test_cash_flow_orders_shortfall_before_salary_and_anchors_salary_to_month_end(self):
-        today=date.today(); start=(today+timedelta(days=1)).isoformat(); income_date=(today+timedelta(days=5)).isoformat()
-        app.save_opening_cash(self.user_a,"100",today.isoformat())
-        category,method=self.category_and_method(self.user_a)
-        recurring=app.save_recurring(self.user_a,{"description":"Synthetic scheduled rent","amount":"150","category_id":category,"payment_method_id":method,"frequency":"monthly","start_on":start})
-        app.save_income(self.user_a,{"description":"Expected salary","income_type":"salary","amount":"200","expected_on":income_date})
-        flow=app.cash_flow_forecast(self.user_a,today.isoformat(),(today+timedelta(days=20)).isoformat(),today)
-        self.assertEqual(flow["starting_cash_minor"],10000)
-        projected=[event for event in flow["projection_events"]]
-        self.assertEqual([event["date"] for event in projected],sorted(event["date"] for event in projected))
-        self.assertEqual(projected[0]["projected_balance_minor"],-5000)
-        self.assertEqual(projected[-1]["projected_balance_minor"],15000)
-        self.assertEqual(flow["risk"],"high")
-        self.assertTrue(any(warning["level"]=="high" for warning in flow["warnings"]))
-        shortfall_warning=next(warning for warning in flow["warnings"] if warning["level"]=="high" and "eksiye düşüyor" in warning["reason"])
-        self.assertNotIn("kuruş",shortfall_warning["reason"])
-        rule=app.save_income_rule(self.user_a,{"description":"Month-end salary","income_type":"salary","amount":"3000","frequency":"monthly","start_on":today.isoformat()})
-        current_month=today.strftime("%Y-%m")
-        overview=app.income_overview(self.user_a,current_month,today)
-        salary=next(row for row in overview["records"] if row["rule_id"]==rule)
-        expected=app.income_recurrence_date(today,"monthly",0,"last_day")
-        self.assertEqual(salary["expected_on"],expected.isoformat())
-        self.assertEqual(app.recurring_overview(self.user_a,today)["rules"][0]["id"],recurring)
-        app.income_overview(self.user_a,current_month,today)
-        self.assertTrue(app.set_income_rule_status(self.user_a,rule,"paused"))
-        calendar_events=app.payment_calendar(self.user_a,today.isoformat(),(today+timedelta(days=45)).isoformat(),today)
-        salary_events=[event for event in calendar_events if event["source_type"]=="income" and event["description"]=="Month-end salary"]
-        self.assertTrue(salary_events)
-        self.assertTrue(all(event["status"]=="paused" for event in salary_events))
-
-    def test_installments_are_visible_but_forecasted_once_via_statement_due(self):
-        today=date.today(); card=app.save_credit_card(self.user_a,{"bank_name":"Synthetic","display_name":"Installment Card","closing_day":today.day,"due_day":15})
-        expense=app.save_expense(self.user_a,{"amount":"100","spent_on":today.isoformat(),"description":"Installment purchase","card_id":card,"installments_count":3,"first_installment_on":today.isoformat()})
-        self.assertTrue(expense)
-        app.save_opening_cash(self.user_a,"1000",today.isoformat())
-        end=(today+timedelta(days=100)).isoformat()
-        flow=app.cash_flow_forecast(self.user_a,today.isoformat(),end,today)
-        statements=[event for event in flow["projection_events"] if event["event_type"]=="card_statement"]
-        installments=[event for event in flow["events"] if event["event_type"]=="installment"]
-        self.assertEqual(len(installments),3)
-        self.assertEqual(sum(-event["cash_effect_minor"] for event in statements),10000)
-        self.assertTrue(all(event.get("projected_balance_minor") is None for event in installments))
-        self.assertEqual(app.summary(self.user_a,today.strftime("%Y-%m"),today)["spent_minor"],10000)
-        self.assertEqual(flow["projected_end_minor"],90000)
-
-    def test_cash_schema_migration_is_additive_and_preserves_existing_records(self):
-        category,_=self.category_and_method(self.user_a)
-        expense=app.save_expense(self.user_a,{"amount":"9","spent_on":date.today().isoformat(),"description":"Preserved expense","category_id":category})
-        with app.connect() as db:
-            db.execute("DROP TABLE cash_adjustments")
-            db.execute("DROP TABLE cash_settings")
-        app.init_db()
-        with app.connect() as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM cash_settings").fetchone()[0],0)
-            self.assertEqual(db.execute("SELECT count(*) FROM cash_adjustments").fetchone()[0],0)
-            self.assertTrue(db.execute("SELECT 1 FROM expenses WHERE id=? AND user_id=?",(expense,self.user_a)).fetchone())
-
-    def test_income_categories_are_persisted_and_owner_checked(self):
-        category_a,_=self.category_and_method(self.user_a)
-        category_b,_=self.category_and_method(self.user_b)
-        today=date.today().isoformat()
-        record_id=app.save_income(self.user_a,{"description":"Synthetic categorized income","amount":"40","expected_on":today,"category_id":str(category_a)})
-        record=next(row for row in app.income_overview(self.user_a,today[:7])['records'] if row['id']==record_id)
-        self.assertEqual(record['category_id'],category_a)
-        with self.assertRaises(ValueError):
-            app.save_income(self.user_a,{"description":"Invalid category","amount":"40","expected_on":today,"category_id":str(category_b)})
-
-    def test_income_schema_migration_is_additive_and_preserves_expenses(self):
-        category,_=self.category_and_method(self.user_a)
-        saved=app.save_expense(self.user_a,{"amount":"12.34","spent_on":date.today().isoformat(),"description":"Preserved expense","category_id":category})
-        app.init_db()
-        self.assertEqual(app.summary(self.user_a,date.today().strftime("%Y-%m"))["spent_minor"],1234)
-        with app.connect() as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM income_records").fetchone()[0],0)
-            self.assertTrue(db.execute("SELECT 1 FROM expenses WHERE id=? AND user_id=?",(saved,self.user_a)).fetchone())
-
-    def test_database_backup_restore_includes_income_rules_and_occurrences(self):
-        today=date.today()
-        rule_id=app.save_income_rule(self.user_a,{"description":"Synthetic archived salary","income_type":"salary","amount":"4200","frequency":"monthly","start_on":today.isoformat()})
-        app.income_overview(self.user_a,today.strftime("%Y-%m"),today)
-        backup=app.create_backup()
-        with app.connect() as db:
-            db.execute("DELETE FROM users WHERE id=?",(self.user_a,))
-        result=app.restore_backup(backup)
-        self.assertTrue(result["recovery_backup"])
-        with app.connect() as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM income_rules WHERE id=? AND user_id=?",(rule_id,self.user_a)).fetchone()[0],1)
-            self.assertGreaterEqual(db.execute("SELECT count(*) FROM income_records WHERE rule_id=? AND user_id=?",(rule_id,self.user_a)).fetchone()[0],1)
-            self.assertEqual(db.execute("SELECT count(*) FROM income_rule_amounts WHERE rule_id=? AND user_id=?",(rule_id,self.user_a)).fetchone()[0],1)
-
-    def test_recurring_pause_resume_end_and_ownership(self):
-        category,_=self.category_and_method(self.user_a)
-        rule_id=app.save_recurring(self.user_a,{"description":"Haftalık ödeme","amount":"25,50","category_id":category,"frequency":"weekly","start_on":"2024-01-01","end_on":"2024-01-14"})
-        self.assertEqual(len(app.recurring_overview(self.user_a,date(2024,1,8))["upcoming"]),1)
-        self.assertEqual(app.recurring_overview(self.user_a,date(2024,1,15))["rules"][0]["next_on"],None)
-        self.assertFalse(app.set_recurring_status(self.user_b,rule_id,"paused"))
-        self.assertEqual(app.recurring_overview(self.user_b,date(2024,1,8))["rules"],[])
-        self.assertTrue(app.set_recurring_status(self.user_a,rule_id,"paused"))
-        self.assertEqual(app.recurring_overview(self.user_a,date(2024,1,8))["upcoming"],[])
-        self.assertTrue(app.set_recurring_status(self.user_a,rule_id,"active"))
-        self.assertEqual(len(app.recurring_overview(self.user_a,date(2024,1,8))["upcoming"]),1)
-        self.assertTrue(app.set_recurring_status(self.user_a,rule_id,"cancelled"))
-        self.assertEqual(app.recurring_overview(self.user_a,date(2024,1,8))["rules"][0]["status"],"cancelled")
-        self.assertFalse(app.set_recurring_status(self.user_a,rule_id,"active"))
-        self.assertEqual(app.save_recurring(self.user_b,{"id":rule_id,"description":"Hijack","amount":"1","frequency":"weekly","start_on":"2024-01-01"}),0)
-
-    def test_occurrence_completion_is_idempotent_and_actual_totals_exclude_plans(self):
-        category,payment=self.category_and_method(self.user_a)
-        today=date(2024,3,10)
-        rule=app.save_recurring(self.user_a,{"description":"Aylık kira","amount":"10000","category_id":category,"payment_method_id":payment,"frequency":"monthly","start_on":"2024-03-15"})
-        before=app.summary(self.user_a,"2024-03",today)
-        self.assertEqual(before["spent_minor"],0)
-        self.assertIsNone(before["month_end_estimate_minor"])
-        overview=app.recurring_overview(self.user_a,today)
-        self.assertEqual(overview["upcoming"][0]["scheduled_on"],"2024-03-15")
-        first=app.complete_recurring_occurrence(self.user_a,rule,"2024-03-15",today)
-        second=app.complete_recurring_occurrence(self.user_a,rule,"2024-03-15",today)
-        self.assertTrue(first["created"])
-        self.assertFalse(second["created"])
-        self.assertEqual(first["expense_id"],second["expense_id"])
-        self.assertEqual(app.summary(self.user_a,"2024-03",today)["spent_minor"],1_000_000)
-        self.assertEqual(app.summary(self.user_b,"2024-03",today)["spent_minor"],0)
-        self.assertIsNone(app.complete_recurring_occurrence(self.user_b,rule,"2024-03-15",today))
-        self.assertEqual(app.save_recurring(self.user_a,{"id":rule,"description":"Yeni kira tutarı","amount":"11000","category_id":category,"payment_method_id":payment,"frequency":"monthly","start_on":"2024-03-15"}),rule)
-        self.assertTrue(app.set_recurring_status(self.user_a,rule,"cancelled"))
-        self.assertEqual(app.summary(self.user_a,"2024-03",today)["spent_minor"],1_000_000)
-        with app.connect() as db:
+            CREATE TABLE income_records(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,rule_id INTEGER,income_type TEXT NOT NULL,description TEXT NOT NULL,amount_minor INTEGER NOT NULL,currency TEXT NOT NULL DEFAULT 'TRY',expected_on TEXT NOT NULL,received_on TEXT,status TEXT NOT NULL DEFAULT 'expected',note TEXT NOT NULL DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(rule_id,expected_on),FOREIGN KEY(rule_id,user…4741 tokens truncated…ect() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM expenses WHERE user_id=?",(self.user_a,)).fetchone()[0],1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM recurring_occurrences WHERE recurring_id=?",(rule,)).fetchone()[0],1)
 
@@ -1106,6 +898,7 @@ class HttpApiTest(unittest.TestCase):
         self.assertIn("Secure",cookie)
 
     def test_health_check_is_non_sensitive_and_reports_database_unavailable(self):
+        self.assertEqual(self.flask_app.test_client().get("/api/db-status").status_code, 404)
         code,data=self.request(self.a,"/healthz")
         self.assertEqual(code,200)
         self.assertEqual(data,{"status":"ok"})

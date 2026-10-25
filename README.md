@@ -13,31 +13,28 @@ python3 app.py
 
 ## Vercel free deployment
 
-This project is prepared for a free Vercel deployment with a serverless-friendly SQLite fallback. Vercel does not provide a persistent writable filesystem, so the app automatically switches to `/tmp` for the SQLite database and backup directory when `VERCEL=1` is set.
+Vercel's function filesystem is temporary. For a usable deployment, connect the project to Supabase through the Vercel Marketplace integration. It supplies `POSTGRES_URL`; the app prefers this serverless-compatible pooler URL over `DATABASE_URL`, which may point at Supabase's IPv6-only direct connection. The SQLite fallback under `/tmp` is only suitable for a disposable smoke test: accounts and expenses can disappear between function instances or deployments.
 
 Recommended Vercel setup:
 
 1. Import this repository into Vercel.
-2. Set the project environment variables in the Vercel dashboard:
+2. In the Vercel Marketplace, connect the Supabase project to this Vercel project. Confirm that `POSTGRES_URL` is present for Production. Do not copy database credentials into source files. Add the application settings below as well:
 
 ```env
 APP_ENV=production
-VERCEL=1
 PRIVATE_BETA=0
 COOKIE_SECURE=1
 TRUST_PROXY=1
-PORT=10000
-EXPENSE_DB_PATH=/tmp/expense-tracker.sqlite3
-EXPENSE_BACKUP_DIR=/tmp/expense-tracker-backups
 ```
 
-3. Keep `PRIVATE_BETA=1` only when you want invite-only registration. For a public beta, keep it at `0`.
-4. Deploy the project from the repository root. The `vercel.json` file routes all requests to the Flask app in `api/index.py`.
+`VERCEL` is supplied by Vercel automatically. Do not set `EXPENSE_DB_PATH` or `EXPENSE_BACKUP_DIR` for the Supabase deployment. Keep `PRIVATE_BETA=1` only when you want invite-only registration; for a public beta, set it to `0`.
+
+3. Deploy the project from the repository root. The `vercel.json` file routes all requests to the Flask app in `api/index.py`.
 
 If you want a private beta, generate an invitation in a trusted shell after deployment:
 
 ```sh
-APP_ENV=production PRIVATE_BETA=1 VERCEL=1 EXPENSE_DB_PATH=/tmp/expense-tracker.sqlite3 EXPENSE_BACKUP_DIR=/tmp/expense-tracker-backups python app.py invite create --expires-hours 72
+APP_ENV=production PRIVATE_BETA=1 python app.py invite create --expires-hours 72
 ```
 
 This keeps the public URL reachable but restricts account signup to valid one-time invitation codes.
