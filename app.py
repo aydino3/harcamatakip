@@ -611,7 +611,7 @@ CREATE INDEX IF NOT EXISTS cash_adjustments_user_date ON cash_adjustments(user_i
 
 
 def _apply_pg_schema(db):
-    """Apply the PostgreSQL schema idempotently and migrate legacy columns."""
+    """Apply the PostgreSQL schema idempotently using CREATE TABLE IF NOT EXISTS."""
     from pg_compat import _split_script, _translate_sql
     statements = _split_script(PG_SCHEMA)
     for stmt in statements:
@@ -622,21 +622,6 @@ def _apply_pg_schema(db):
                 db._conn.commit()
             except Exception:
                 db._conn.rollback()
-
-    # CREATE TABLE IF NOT EXISTS does not upgrade a pre-existing table. Older
-    # Supabase databases may have auth_failures without the current rate-limit
-    # columns, which otherwise makes every signup/login fail with UndefinedColumn.
-    for statement in (
-        "ALTER TABLE auth_failures ADD COLUMN IF NOT EXISTS source_hash TEXT",
-        "ALTER TABLE auth_failures ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'login'",
-        "ALTER TABLE auth_failures ADD COLUMN IF NOT EXISTS occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
-    ):
-        db._conn.cursor().execute(statement)
-    db._conn.cursor().execute(
-        "CREATE INDEX IF NOT EXISTS auth_failures_window "
-        "ON auth_failures(source_hash,scope,occurred_at)"
-    )
-    db._conn.commit()
 
 
 def _migrate_income_daily_frequency(db):
@@ -1052,22 +1037,25 @@ def reserve_auth_attempt(address: str, scope: str, identity: str = "") -> bool:
     source_hash = _auth_source_hash(address, scope, identity)
     with LOCK, connect() as db:
         db.execute("BEGIN IMMEDIATE")
+        rate_limit_table = "auth_failures"
         if configured_database_url():
-            # Self-heal old Supabase tables on the request path too. Some deployed
-            # databases predate these columns and CREATE TABLE IF NOT EXISTS alone
-            # never upgrades them.
+            # Keep the PostgreSQL throttle in its own versioned table. Older
+            # deployments may have an incompatible auth_failures relation.
+            rate_limit_table = "auth_rate_limit_events"
             db._conn.cursor().execute(
-                "CREATE TABLE IF NOT EXISTS auth_failures "
-                "(source_hash TEXT, scope TEXT, occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+                "CREATE TABLE IF NOT EXISTS auth_rate_limit_events "
+                "(source_hash TEXT NOT NULL, scope TEXT NOT NULL, "
+                "occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)"
             )
-            db._conn.cursor().execute("ALTER TABLE auth_failures ADD COLUMN IF NOT EXISTS source_hash TEXT")
-            db._conn.cursor().execute("ALTER TABLE auth_failures ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'login'")
-            db._conn.cursor().execute("ALTER TABLE auth_failures ADD COLUMN IF NOT EXISTS occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP")
-        db.execute("DELETE FROM auth_failures WHERE occurred_at<datetime('now','-1 day')")
-        count = db.execute("SELECT COUNT(*) FROM auth_failures WHERE source_hash=? AND scope=? AND occurred_at>=datetime('now','-15 minutes')", (source_hash, scope)).fetchone()[0]
+            db._conn.cursor().execute(
+                "CREATE INDEX IF NOT EXISTS auth_rate_limit_events_window "
+                "ON auth_rate_limit_events(source_hash,scope,occurred_at)"
+            )
+        db.execute(f"DELETE FROM {rate_limit_table} WHERE occurred_at<datetime('now','-1 day')")
+        count = db.execute(f"SELECT COUNT(*) FROM {rate_limit_table} WHERE source_hash=? AND scope=? AND occurred_at>=datetime('now','-15 minutes')", (source_hash, scope)).fetchone()[0]
         if count >= limit:
             return True
-        db.execute("INSERT INTO auth_failures(source_hash,scope) VALUES(?,?)", (source_hash, scope))
+        db.execute(f"INSERT INTO {rate_limit_table}(source_hash,scope) VALUES(?,?)", (source_hash, scope))
         return False
 
 
