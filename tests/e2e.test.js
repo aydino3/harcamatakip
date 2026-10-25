@@ -187,7 +187,7 @@ test("local signup, expense/category/budget/recurring/CSV flows, account switchi
     await page.getByRole("link", { name: "Harcamalarım" }).click();
 
     await page.locator('#budget-form select[name="category_id"]').selectOption({ label: "E2E Test" });
-    await page.locator('#budget-form input[name="amount"]').fill("35.00");
+    await page.locator('#budget-form input[name="amount"]').fill("28.00");
     await page.locator('#budget-form button[type="submit"]').click();
     await page.getByText("Bütçeye yaklaşıyor", { exact: true }).waitFor({ state: "visible" });
 
