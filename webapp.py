@@ -94,9 +94,10 @@ def create_app(test_config: dict | None = None) -> Flask:
         diag = getattr(error, "diag", None)
         table_name = getattr(diag, "table_name", None)
         column_name = getattr(diag, "column_name", None)
+        primary_message = getattr(diag, "message_primary", None)
         web.logger.error(
-            "Unhandled request error (%s; table=%r; column=%r)\n%s",
-            type(error).__name__, table_name, column_name, stack
+            "Unhandled request error (%s; table=%r; column=%r; message=%r)\n%s",
+            type(error).__name__, table_name, column_name, primary_message, stack
         )
         # Avoid returning exception details (SQL, filesystem paths, request data) to clients.
         return json_error("Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.", 500)
