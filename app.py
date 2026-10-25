@@ -937,8 +937,9 @@ def create_invitation(expires_hours=72):
     token = secrets.token_urlsafe(32)
     digest = hashlib.sha256(token.encode("ascii")).hexdigest()
     with connect() as db:
-        cursor = db.execute("INSERT INTO invitations(token_hash,expires_at) VALUES(?,datetime('now',?))",
-                            (digest, f"+{expires_hours} hours"))
+        expires_at = datetime.utcnow() + timedelta(hours=expires_hours)
+        cursor = db.execute("INSERT INTO invitations(token_hash,expires_at) VALUES(?,?)",
+                            (digest, expires_at))
         invitation_id = cursor.lastrowid
     return invitation_id, token
 
@@ -947,8 +948,8 @@ def revoke_invitation(invitation_id):
     if isinstance(invitation_id, bool) or not str(invitation_id).isdigit():
         return False
     with connect() as db:
-        cursor = db.execute("UPDATE invitations SET revoked_at=CURRENT_TIMESTAMP WHERE id=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>datetime('now')",
-                            (int(invitation_id),))
+        cursor = db.execute("UPDATE invitations SET revoked_at=CURRENT_TIMESTAMP WHERE id=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>?",
+                            (int(invitation_id), datetime.utcnow()))
     return cursor.rowcount == 1
 
 
@@ -967,7 +968,7 @@ def create_user(email: str, password: str, invitation_token=None, require_invita
     with connect() as db:
         if require_invitation:
             db.execute("BEGIN IMMEDIATE")
-            invitation = db.execute("SELECT id FROM invitations WHERE token_hash=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>datetime('now')", (token_hash,)).fetchone()
+            invitation = db.execute("SELECT id FROM invitations WHERE token_hash=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>?", (token_hash, datetime.utcnow())).fetchone()
             if not invitation:
                 raise InvalidInvitation("invalid invitation")
         cur = db.execute("INSERT INTO users(email,password_hash,password_salt) VALUES(?,?,?)",
@@ -976,7 +977,7 @@ def create_user(email: str, password: str, invitation_token=None, require_invita
         db.executemany("INSERT INTO categories(user_id,name) VALUES(?,?)", [(user_id, n) for n in DEFAULT_CATEGORIES])
         db.executemany("INSERT INTO payment_methods(user_id,name) VALUES(?,?)", [(user_id, n) for n in DEFAULT_METHODS])
         if require_invitation:
-            consumed = db.execute("UPDATE invitations SET used_at=CURRENT_TIMESTAMP WHERE id=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>datetime('now')", (invitation["id"],))
+            consumed = db.execute("UPDATE invitations SET used_at=CURRENT_TIMESTAMP WHERE id=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>?", (invitation["id"], datetime.utcnow()))
             if consumed.rowcount != 1:
                 raise InvalidInvitation("invalid invitation")
         return user_id
@@ -1001,8 +1002,9 @@ def create_session(user_id: int):
     token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with connect() as db:
-        db.execute("INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at) VALUES(?,?,?,datetime('now','+7 days'))",
-                   (token_hash, user_id, csrf))
+        expires_at = datetime.utcnow() + timedelta(days=7)
+        db.execute("INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at) VALUES(?,?,?,?)",
+                   (token_hash, user_id, csrf, expires_at))
     return token, csrf
 
 
@@ -1019,7 +1021,7 @@ def session_user(token: str | None):
         return None
     digest = hashlib.sha256(token.encode()).hexdigest()
     with connect() as db:
-        row = db.execute("SELECT user_id,csrf_token FROM sessions WHERE token_hash=? AND expires_at>datetime('now')", (digest,)).fetchone()
+        row = db.execute("SELECT user_id,csrf_token FROM sessions WHERE token_hash=? AND expires_at>?", (digest, datetime.utcnow())).fetchone()
     return dict(row) if row else None
 
 
