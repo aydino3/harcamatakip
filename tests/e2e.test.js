@@ -179,10 +179,11 @@ test("local signup, expense/category/budget/recurring/CSV flows, account switchi
     await page.getByRole("link", { name: "Harcamalarım" }).click();
 
     await expenseRow.getByRole("button", { name: "Düzenle" }).click();
-    await page.locator('#expense-form input[name="amount"]').fill("30.00");
+    await page.locator('#expense-form input[name="description"]').fill("E2E market harcaması güncellendi");
     await page.locator('#expense-form button.primary').click();
+    await page.locator("#expense-dialog").waitFor({ state: "hidden" });
     await page.getByRole("link", { name: /Genel Bakış/ }).click();
-    assert.match(await page.locator(".stat.spend strong").innerText(), /30,00/);
+    assert.match(await page.locator(".stat.spend strong").innerText(), /25,00/);
     await page.getByRole("link", { name: "Harcamalarım" }).click();
 
     await page.locator('#budget-form select[name="category_id"]').selectOption({ label: "E2E Test" });
@@ -201,7 +202,7 @@ test("local signup, expense/category/budget/recurring/CSV flows, account switchi
     await page.locator("#month").fill(currentMonth);
     const currentLabel = new Intl.DateTimeFormat("tr-TR", { month: "long", year: "numeric" }).format(new Date(`${currentMonth}-01T12:00:00`));
     await page.getByText(currentLabel, { exact: true }).waitFor({ state: "visible" });
-    assert.match(await page.locator(".stat.spend strong").innerText(), /30,00/);
+    assert.match(await page.locator(".stat.spend strong").innerText(), /25,00/);
     await page.getByRole("link", { name: "Harcamalarım" }).click();
 
     await expenseRow.getByRole("button", { name: "Sil" }).click();
