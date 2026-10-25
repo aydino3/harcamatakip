@@ -11,6 +11,37 @@ python -m pip install -r requirements.txt
 python3 app.py
 ```
 
+## Vercel free deployment
+
+This project is prepared for a free Vercel deployment with a serverless-friendly SQLite fallback. Vercel does not provide a persistent writable filesystem, so the app automatically switches to `/tmp` for the SQLite database and backup directory when `VERCEL=1` is set.
+
+Recommended Vercel setup:
+
+1. Import this repository into Vercel.
+2. Set the project environment variables in the Vercel dashboard:
+
+```env
+APP_ENV=production
+VERCEL=1
+PRIVATE_BETA=0
+COOKIE_SECURE=1
+TRUST_PROXY=1
+PORT=10000
+EXPENSE_DB_PATH=/tmp/expense-tracker.sqlite3
+EXPENSE_BACKUP_DIR=/tmp/expense-tracker-backups
+```
+
+3. Keep `PRIVATE_BETA=1` only when you want invite-only registration. For a public beta, keep it at `0`.
+4. Deploy the project from the repository root. The `vercel.json` file routes all requests to the Flask app in `api/index.py`.
+
+If you want a private beta, generate an invitation in a trusted shell after deployment:
+
+```sh
+APP_ENV=production PRIVATE_BETA=1 VERCEL=1 EXPENSE_DB_PATH=/tmp/expense-tracker.sqlite3 EXPENSE_BACKUP_DIR=/tmp/expense-tracker-backups python app.py invite create --expires-hours 72
+```
+
+This keeps the public URL reachable but restricts account signup to valid one-time invitation codes.
+
 Open http://127.0.0.1:8000. The server binds to `127.0.0.1` by default and creates the SQLite database at `data/expenses.sqlite3`. To use another local port or database path:
 
 ```sh

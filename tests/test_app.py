@@ -143,6 +143,27 @@ class AppTest(unittest.TestCase):
         finally:
             app.DB_PATH,app.BACKUP_DIR=original_path,original_backup
 
+    def test_vercel_runtime_uses_temp_database_without_persistent_mount_requirements(self):
+        original_path, original_backup = app.DB_PATH, app.BACKUP_DIR
+        try:
+            env = {
+                "APP_ENV": "production",
+                "VERCEL": "1",
+                "PRIVATE_BETA": "0",
+                "COOKIE_SECURE": "1",
+                "PORT": "10000",
+                "TRUST_PROXY": "1",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("EXPENSE_DB_PATH", None)
+                os.environ.pop("PERSISTENT_DATA_DIR", None)
+                os.environ.pop("REQUIRE_PERSISTENT_MOUNT", None)
+                self.assertTrue(app.validate_runtime_configuration())
+                self.assertEqual(app.DB_PATH, Path("/tmp/expense-tracker.sqlite3"))
+                self.assertEqual(app.BACKUP_DIR, Path("/tmp/expense-tracker-backups"))
+        finally:
+            app.DB_PATH, app.BACKUP_DIR = original_path, original_backup
+
     def test_production_wsgi_entry_validates_then_initializes_database(self):
         persistent=Path(self.temp.name)/"mounted"
         persistent.mkdir()

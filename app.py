@@ -18,8 +18,30 @@ from pathlib import Path
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 ROOT = Path(__file__).resolve().parent
-DB_PATH = Path(os.environ.get("EXPENSE_DB_PATH", ROOT / "data" / "expenses.sqlite3"))
-BACKUP_DIR = Path(os.environ.get("EXPENSE_BACKUP_DIR", DB_PATH.parent / "backups"))
+
+
+def _default_db_path() -> Path:
+    if os.environ.get("VERCEL", "").strip().lower() == "1":
+        return Path("/tmp/expense-tracker.sqlite3")
+    return ROOT / "data" / "expenses.sqlite3"
+
+
+def _default_backup_dir() -> Path:
+    if os.environ.get("VERCEL", "").strip().lower() == "1":
+        return Path("/tmp/expense-tracker-backups")
+    return _default_db_path().parent / "backups"
+
+
+if os.environ.get("VERCEL", "").strip().lower() == "1":
+    os.environ.setdefault("APP_ENV", "production")
+    os.environ.setdefault("PRIVATE_BETA", "0")
+    os.environ.setdefault("COOKIE_SECURE", "1")
+    os.environ.setdefault("TRUST_PROXY", "1")
+    os.environ.setdefault("EXPENSE_DB_PATH", "/tmp/expense-tracker.sqlite3")
+    os.environ.setdefault("EXPENSE_BACKUP_DIR", "/tmp/expense-tracker-backups")
+
+DB_PATH = Path(os.environ.get("EXPENSE_DB_PATH", str(_default_db_path())))
+BACKUP_DIR = Path(os.environ.get("EXPENSE_BACKUP_DIR", str(_default_backup_dir())))
 COOKIE = "expense_session"
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"
 LOCK = threading.Lock()
@@ -208,12 +230,52 @@ def init_db():
 
 
 def validate_runtime_configuration():
-    """Require an explicit, mounted, writable absolute SQLite path in production."""
+    """Require an explicit, writable absolute SQLite path in production, with a Vercel fallback for serverless hosting."""
+    global DB_PATH, BACKUP_DIR
     environment = os.environ.get("APP_ENV", "development").strip().lower()
     if environment not in ("development", "production"):
         raise ValueError("APP_ENV must be either development or production.")
     if environment != "production":
         return True
+
+    if os.environ.get("VERCEL", "").strip().lower() == "1":
+        raw_db_path = os.environ.get("EXPENSE_DB_PATH", str(_default_db_path())).strip()
+        candidate = Path(raw_db_path).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError("Vercel EXPENSE_DB_PATH must be an absolute path.")
+        parent = candidate.parent
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            try:
+                os.chmod(parent, 0o700)
+            except PermissionError:
+                pass
+        if candidate.is_symlink() or (candidate.exists() and not candidate.is_file()):
+            raise ValueError("Production database path must be a regular file, not a symbolic link or directory.")
+        if not candidate.exists():
+            candidate.touch(mode=0o600)
+        if os.name != "nt":
+            try:
+                os.chmod(candidate, 0o600)
+            except PermissionError:
+                pass
+        raw_backup = os.environ.get("EXPENSE_BACKUP_DIR", str(_default_backup_dir())).strip()
+        backup_path = Path(raw_backup).expanduser()
+        if not backup_path.is_absolute():
+            raise ValueError("Vercel EXPENSE_BACKUP_DIR must be an absolute path.")
+        backup_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            try:
+                os.chmod(backup_path, 0o700)
+            except PermissionError:
+                pass
+        DB_PATH, BACKUP_DIR = candidate, backup_path
+        port = os.environ.get("PORT", "10000")
+        if not port.isdigit() or not 1 <= int(port) <= 65535:
+            raise ValueError("PORT must be a valid TCP port number.")
+        private_beta_enabled(strict=True)
+        return True
+
     raw_db_path = os.environ.get("EXPENSE_DB_PATH", "").strip()
     if not raw_db_path:
         raise ValueError("Production requires EXPENSE_DB_PATH to point inside a persistent disk mount.")
@@ -270,7 +332,6 @@ def validate_runtime_configuration():
     except ValueError as error:
         raise ValueError("Production backups must be stored on the configured persistent disk.") from error
     _assert_outside_static(resolved_backup)
-    global DB_PATH, BACKUP_DIR
     DB_PATH, BACKUP_DIR = candidate, backup_path
     port = os.environ.get("PORT", "10000")
     if not port.isdigit() or not 1 <= int(port) <= 65535:
