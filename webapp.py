@@ -104,6 +104,39 @@ def create_app(test_config: dict | None = None) -> Flask:
         except Exception:
             return json_error("Hizmet geçici olarak kullanılamıyor.", 503)
 
+    @web.get("/api/db-status")
+    def db_status_route():
+        """Temporary diagnostic endpoint — shows DB connection state. Remove after debugging."""
+        import sys as _sys
+        info = {
+            "python": _sys.version,
+            "db_url_set": bool(os.environ.get("DATABASE_URL")),
+            "app_env": os.environ.get("APP_ENV"),
+            "private_beta_env": os.environ.get("PRIVATE_BETA"),
+        }
+        try:
+            import psycopg2 as _pg2
+            info["psycopg2_version"] = _pg2.__version__
+        except ImportError as _e:
+            info["psycopg2_import_error"] = str(_e)
+        try:
+            with core.connect() as db:
+                db.execute("SELECT 1").fetchone()
+                info["db_connected"] = True
+                try:
+                    rows = db.execute(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema='public' ORDER BY table_name"
+                    ).fetchall()
+                    info["tables"] = [r[0] for r in rows]
+                except Exception as _te:
+                    info["table_list_error"] = str(_te)
+        except Exception as _ce:
+            info["db_connected"] = False
+            info["db_error"] = str(_ce)
+            info["db_error_type"] = type(_ce).__name__
+        return jsonify(info)
+
     @web.get("/api/session")
     def session_route():
         session = core.session_user(request.cookies.get(core.COOKIE))
