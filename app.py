@@ -151,7 +151,7 @@ CREATE TABLE IF NOT EXISTS recurring_occurrences (
  paid_on TEXT NOT NULL, UNIQUE(recurring_id,scheduled_on),
  FOREIGN KEY(recurring_id,user_id) REFERENCES recurring_expenses(id,user_id) ON DELETE CASCADE
 );
-CREATE TABLE IF NOT EXISTS sessions (
+CREATE TABLE IF NOT EXISTS auth_sessions_v2 (
  token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
  csrf_token TEXT NOT NULL, expires_at TEXT NOT NULL
 );
@@ -394,7 +394,7 @@ REQUIRED_SCHEMA = {
     "payment_methods": {"id", "user_id", "name"},
     "expenses": {"id", "user_id", "category_id", "payment_method_id", "card_id", "statement_id", "installments_count", "amount_minor", "spent_on", "description", "note"},
     "budgets": {"id", "user_id", "month", "category_id", "amount_minor"},
-    "sessions": {"token_hash", "user_id", "csrf_token", "expires_at"},
+    "auth_sessions_v2": {"token_hash", "user_id", "csrf_token", "expires_at"},
     "recurring_expenses": {"id", "user_id", "category_id", "payment_method_id", "amount_minor", "description", "frequency", "start_on", "end_on", "status"},
     "recurring_occurrences": {"id", "recurring_id", "user_id", "scheduled_on", "expense_id", "paid_on"},
     "income_rules": {"id", "user_id", "category_id", "income_type", "description", "frequency", "schedule_mode", "start_on", "end_on", "status"},
@@ -622,20 +622,15 @@ def _apply_pg_schema(db):
                 db._conn.commit()
             except Exception:
                 db._conn.rollback()
-    # Older Supabase databases may already have a sessions table created
-    # before CSRF and expiry columns were introduced. CREATE TABLE IF NOT EXISTS
-    # does not evolve existing tables, so add these columns explicitly.
+    # Use a fresh auth-session relation so an old, partial sessions table cannot
+    # break current registration or sign-in. Keep all SQL identifiers explicit.
     db._conn.cursor().execute(
-        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS token_hash TEXT"
-    )
-    db._conn.cursor().execute(
-        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id BIGINT"
-    )
-    db._conn.cursor().execute(
-        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS csrf_token TEXT NOT NULL DEFAULT ''"
-    )
-    db._conn.cursor().execute(
-        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS expires_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'"
+        """CREATE TABLE IF NOT EXISTS auth_sessions_v2 (
+            token_hash TEXT PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            csrf_token TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        )"""
     )
     db._conn.commit()
 
@@ -1018,7 +1013,7 @@ def create_session(user_id: int):
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with connect() as db:
         expires_at = (datetime.utcnow() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-        db.execute("INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at) VALUES(?,?,?,?)",
+        db.execute("INSERT INTO auth_sessions_v2(token_hash,user_id,csrf_token,expires_at) VALUES(?,?,?,?)",
                    (token_hash, user_id, csrf, expires_at))
     return token, csrf
 
@@ -1028,7 +1023,7 @@ def revoke_session(token: str | None):
         return
     digest = hashlib.sha256(token.encode()).hexdigest()
     with connect() as db:
-        db.execute("DELETE FROM sessions WHERE token_hash=?", (digest,))
+        db.execute("DELETE FROM auth_sessions_v2 WHERE token_hash=?", (digest,))
 
 
 def session_user(token: str | None):
@@ -1036,7 +1031,7 @@ def session_user(token: str | None):
         return None
     digest = hashlib.sha256(token.encode()).hexdigest()
     with connect() as db:
-        row = db.execute("SELECT user_id,csrf_token FROM sessions WHERE token_hash=? AND expires_at>?", (digest, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))).fetchone()
+        row = db.execute("SELECT user_id,csrf_token FROM auth_sessions_v2 WHERE token_hash=? AND expires_at>?", (digest, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))).fetchone()
     return dict(row) if row else None
 
 
