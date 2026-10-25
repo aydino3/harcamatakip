@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: expense-tracker
+    runtime: python
+    region: frankfurt
+    plan: 0.5c-512mb
+    numInstances: 1
+    autoDeployTrigger: checksPass
+    buildCommand: pip install -r requirements.txt
+    startCommand: python production.py
+    healthCheckPath: /healthz
+    disk:
+      name: expense-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: PRIVATE_BETA
+        value: "1"
+      - key: EXPENSE_DB_PATH
+        value: /var/data/expenses.sqlite3
+      - key: PERSISTENT_DATA_DIR
+        value: /var/data
+      - key: REQUIRE_PERSISTENT_MOUNT
+        value: "1"
+      - key: EXPENSE_BACKUP_DIR
+        value: /var/data/backups
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: TRUST_PROXY
+        value: "1"
