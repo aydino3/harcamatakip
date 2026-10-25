@@ -611,7 +611,7 @@ CREATE INDEX IF NOT EXISTS cash_adjustments_user_date ON cash_adjustments(user_i
 
 
 def _apply_pg_schema(db):
-    """Apply the PostgreSQL schema idempotently using CREATE TABLE IF NOT EXISTS."""
+    """Apply the PostgreSQL schema idempotently and migrate legacy columns."""
     from pg_compat import _split_script, _translate_sql
     statements = _split_script(PG_SCHEMA)
     for stmt in statements:
@@ -622,6 +622,21 @@ def _apply_pg_schema(db):
                 db._conn.commit()
             except Exception:
                 db._conn.rollback()
+
+    # CREATE TABLE IF NOT EXISTS does not upgrade a pre-existing table. Older
+    # Supabase databases may have auth_failures without the current rate-limit
+    # columns, which otherwise makes every signup/login fail with UndefinedColumn.
+    for statement in (
+        "ALTER TABLE auth_failures ADD COLUMN IF NOT EXISTS source_hash TEXT",
+        "ALTER TABLE auth_failures ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'login'",
+        "ALTER TABLE auth_failures ADD COLUMN IF NOT EXISTS occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    ):
+        db._conn.cursor().execute(statement)
+    db._conn.cursor().execute(
+        "CREATE INDEX IF NOT EXISTS auth_failures_window "
+        "ON auth_failures(source_hash,scope,occurred_at)"
+    )
+    db._conn.commit()
 
 
 def _migrate_income_daily_frequency(db):
