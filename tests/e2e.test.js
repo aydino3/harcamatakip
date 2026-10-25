@@ -149,7 +149,7 @@ test("local signup, expense/category/budget/recurring/CSV flows, account switchi
     await page.getByRole("button", { name: /Kategori ekle/ }).click();
     await page.locator('#category-form input[name="name"]').fill("E2E Test");
     await page.locator("#category-form button.primary").click();
-    await page.getByText("E2E Test", { exact: true }).waitFor({ state: "visible" });
+    await page.locator('#expense-form select[name="category_id"] option').filter({ hasText: "E2E Test" }).waitFor({ state: "attached" });
 
     const currentMonth = new Date().toISOString().slice(0, 7);
     const today = new Date().toISOString().slice(0, 10);
