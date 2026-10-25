@@ -94,7 +94,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             with core.connect() as db:
                 db.execute("SELECT 1").fetchone()
             return jsonify(status="ok")
-        except sqlite3.DatabaseError:
+        except Exception:
             return json_error("Hizmet geçici olarak kullanılamıyor.", 503)
 
     @web.get("/api/session")
@@ -116,7 +116,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         try:
             saved = core.save_credit_card(session["user_id"], data)
             return json_error("Kart bulunamadı.", 404) if not saved else jsonify(id=saved)
-        except (ValueError, TypeError, sqlite3.IntegrityError):
+        except (ValueError, TypeError, *core._DB_INTEGRITY_ERRORS):
             return json_error("Kart bilgilerini kontrol edin.", 400)
 
     @web.get("/api/cards/<card_id>/statements")
@@ -137,7 +137,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         try:
             saved = core.record_card_repayment(session["user_id"], core.record_id(card_id), data)
             return json_error("Kart bulunamadı.", 404) if not saved else jsonify(id=saved)
-        except (ValueError, TypeError, sqlite3.IntegrityError):
+        except (ValueError, TypeError, *core._DB_INTEGRITY_ERRORS):
             return json_error("Kart ödeme bilgilerini ve tutarı kontrol edin.", 400)
 
     @web.post("/api/statements/<statement_id>/dates")
@@ -241,7 +241,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         month = request.args.get("month", date.today().strftime("%Y-%m"))
         try:
             return jsonify(core.income_overview(session["user_id"], month))
-        except (ValueError, TypeError, sqlite3.IntegrityError):
+        except (ValueError, TypeError, *core._DB_INTEGRITY_ERRORS):
             return json_error("Gelir bilgileri yüklenemedi. Seçili ayı kontrol edin.", 400)
 
     @web.get("/api/income.csv")
@@ -266,7 +266,7 @@ def create_app(test_config: dict | None = None) -> Flask:
                 return json_error("Gelir kuralı bulunamadı veya iptal edilmiş.", 404) if not saved else jsonify(id=saved, kind="rule")
             saved = core.save_income(session["user_id"], data)
             return json_error("Gelir kaydı bulunamadı.", 404) if not saved else jsonify(id=saved, kind="record")
-        except (ValueError, TypeError, sqlite3.IntegrityError):
+        except (ValueError, TypeError, *core._DB_INTEGRITY_ERRORS):
             return json_error("Gelir bilgilerini kontrol edin.", 400)
 
     @web.post("/api/income/<income_id>/status")
@@ -318,7 +318,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             return json_error("Geçersiz istek.", 400)
         try:
             changed = core.set_income_rule_amount(session["user_id"], core.record_id(rule_id), data.get("effective_on", ""), data.get("amount"))
-        except (ValueError, TypeError, sqlite3.IntegrityError):
+        except (ValueError, TypeError, *core._DB_INTEGRITY_ERRORS):
             return json_error("Yeni gelir tutarı ve yürürlük tarihini kontrol edin.", 400)
         return jsonify(ok=True) if changed else json_error("Aktif gelir kuralı bulunamadı.", 404)
 
@@ -378,7 +378,7 @@ def create_app(test_config: dict | None = None) -> Flask:
                 user_id = core.create_user(data.get("email", ""), data.get("password", ""), data.get("invitation_token"), web.config["PRIVATE_BETA"])
             except core.InvalidInvitation:
                 return json_error("Davet kodu geçersiz, süresi dolmuş veya kullanılmış.", 403)
-            except sqlite3.IntegrityError:
+            except (*core._DB_INTEGRITY_ERRORS,):
                 return json_error("Kayıt tamamlanamadı. Bilgileri kontrol edin.", 400)
             except (ValueError, AttributeError):
                 return json_error("E-posta veya parola geçersiz. Parola en az 10 karakter olmalı.", 400)
@@ -419,7 +419,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             return json_error("Çok sayıda deneme yapıldı. Lütfen bir süre sonra tekrar deneyin.", 429)
         try:
             deleted = core.delete_account(session["user_id"], data.get("password"), data.get("confirmation"))
-        except (TypeError, sqlite3.IntegrityError):
+        except (TypeError, *core._DB_INTEGRITY_ERRORS):
             deleted = False
         if not deleted:
             return json_error("Parolanızı ve hesap silme onayını kontrol edin.", 400)
@@ -440,7 +440,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         try:
             saved = core.save_expense(session["user_id"], data)
             return json_error("Harcama bulunamadı.", 404) if not saved else jsonify(id=saved)
-        except (ValueError, TypeError, sqlite3.IntegrityError):
+        except (ValueError, TypeError, *core._DB_INTEGRITY_ERRORS):
             return json_error("Harcama bilgilerini kontrol edin.", 400)
 
     @web.post("/api/import/preview")
@@ -469,7 +469,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             if not isinstance(selected, list) or any(isinstance(value, bool) or not isinstance(value, int) for value in selected):
                 raise ValueError
             return jsonify(core.import_csv_rows(session["user_id"], data.get("csv", ""), selected))
-        except (ValueError, TypeError, csv.Error, sqlite3.IntegrityError) as exc:
+        except (ValueError, TypeError, csv.Error, *core._DB_INTEGRITY_ERRORS) as exc:
             return json_error(str(exc) or "CSV içe aktarılamadı. Dosyayı yeniden önizleyip kontrol edin.", 400)
 
     @web.post("/api/recurring")
@@ -483,7 +483,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         try:
             saved = core.save_recurring(session["user_id"], data)
             return json_error("Düzenli harcama bulunamadı veya iptal edilmiş.", 404) if not saved else jsonify(id=saved)
-        except (ValueError, TypeError, sqlite3.IntegrityError):
+        except (ValueError, TypeError, *core._DB_INTEGRITY_ERRORS):
             return json_error("Düzenli harcama bilgilerini kontrol edin.", 400)
 
     @web.post("/api/recurring/<recurring_id>/status")
@@ -508,7 +508,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         try:
             result = core.complete_recurring_occurrence(session["user_id"], core.record_id(recurring_id), scheduled_on)
             return json_error("Düzenli harcama bulunamadı.", 404) if result is None else jsonify(result)
-        except (ValueError, TypeError, sqlite3.IntegrityError):
+        except (ValueError, TypeError, *core._DB_INTEGRITY_ERRORS):
             return json_error("Bu düzenli harcama gerçekleşmesi kaydedilemedi.", 400)
 
     @web.post("/api/budgets")
@@ -522,7 +522,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         try:
             core.save_budget(session["user_id"], data.get("month", ""), data.get("amount"), data.get("category_id"))
             return jsonify(ok=True)
-        except (ValueError, TypeError, sqlite3.IntegrityError):
+        except (ValueError, TypeError, *core._DB_INTEGRITY_ERRORS):
             return json_error("Bütçe bilgilerini kontrol edin.", 400)
 
     @web.post("/api/categories")
@@ -543,7 +543,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             with core.connect() as db:
                 db.execute("INSERT INTO categories(user_id,name) VALUES(?,?)", (session["user_id"], name))
             return jsonify(ok=True), 201
-        except sqlite3.IntegrityError:
+        except (*core._DB_INTEGRITY_ERRORS,):
             return json_error("Bu kategori zaten var.", 409)
 
     @web.delete("/api/expenses/<expense_id>")

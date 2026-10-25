@@ -1,4 +1,4 @@
-"""Expense tracker business logic and SQLite persistence."""
+"""Expense tracker business logic and SQLite/PostgreSQL persistence."""
 from __future__ import annotations
 
 import hashlib
@@ -16,6 +16,21 @@ import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+# When DATABASE_URL is set we use PostgreSQL via psycopg2 (Supabase / Vercel).
+# When it is absent we fall back to the original SQLite path (local dev).
+_DATABASE_URL: str | None = os.environ.get("DATABASE_URL", "").strip() or None
+
+if _DATABASE_URL:
+    try:
+        import psycopg2
+        import psycopg2.errors
+        _DB_INTEGRITY_ERRORS = (psycopg2.IntegrityError,)
+    except ImportError:
+        psycopg2 = None  # type: ignore
+        _DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
+else:
+    _DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
 
 ROOT = Path(__file__).resolve().parent
 
@@ -187,6 +202,13 @@ DEFAULT_METHODS = ["Nakit", "Banka kartı", "Kredi kartı"]
 
 
 def connect(allow_create=False):
+    """Return a database connection — PostgreSQL when DATABASE_URL is set, else SQLite."""
+    global _DATABASE_URL
+    url = _DATABASE_URL or os.environ.get("DATABASE_URL", "").strip() or None
+    if url:
+        from pg_compat import connect_pg
+        return connect_pg(url)
+    # ---------- SQLite path (local development) ----------
     if allow_create:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if os.name != "nt" and DB_PATH.parent == ROOT / "data":
@@ -195,8 +217,6 @@ def connect(allow_create=False):
     else:
         if DB_PATH.is_symlink():
             raise sqlite3.OperationalError("Database path must not be a symbolic link.")
-        # Normal requests must never silently bootstrap an empty DB if the active
-        # database is missing; only init_db() is allowed to create it.
         db = sqlite3.connect(f"{DB_PATH.resolve().as_uri()}?mode=rw", uri=True)
     if os.name != "nt":
         os.chmod(DB_PATH, 0o600)
@@ -206,12 +226,16 @@ def connect(allow_create=False):
 
 
 def init_db():
+    url = os.environ.get("DATABASE_URL", "").strip() or None
+    if url:
+        # PostgreSQL: apply schema directly (idempotent CREATE TABLE IF NOT EXISTS)
+        from pg_compat import connect_pg
+        with connect_pg(url) as db:
+            _apply_pg_schema(db)
+        return
+    # SQLite path
     with LOCK, connect(allow_create=True) as db:
         _apply_additive_schema(db)
-        # SQLite permits multiple NULL values in a composite UNIQUE key. Older
-        # builds could therefore create duplicate overall budgets; keep the
-        # latest saved amount and prevent new duplicates without touching the
-        # user's expenses or category budgets.
         db.execute("DELETE FROM budgets WHERE category_id IS NULL AND id NOT IN (SELECT MAX(id) FROM budgets WHERE category_id IS NULL GROUP BY user_id,month)")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS budget_overall_unique ON budgets(user_id,month) WHERE category_id IS NULL")
     if os.environ.get("APP_ENV", "development").strip().lower() == "production":
@@ -232,6 +256,11 @@ def init_db():
 def validate_runtime_configuration():
     """Require an explicit, writable absolute SQLite path in production, with a Vercel fallback for serverless hosting."""
     global DB_PATH, BACKUP_DIR
+    # In PostgreSQL mode the connection string carries all configuration;
+    # SQLite file-path and mount checks are not applicable.
+    if os.environ.get("DATABASE_URL", "").strip():
+        private_beta_enabled(strict=True)
+        return True
     environment = os.environ.get("APP_ENV", "development").strip().lower()
     if environment not in ("development", "production"):
         raise ValueError("APP_ENV must be either development or production.")
@@ -407,6 +436,183 @@ def _apply_additive_schema(db):
         if "category_id" not in columns:
             db.execute(f'ALTER TABLE "{table}" ADD COLUMN category_id INTEGER')
     _migrate_income_daily_frequency(db)
+
+
+PG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+ id BIGSERIAL PRIMARY KEY, email TEXT NOT NULL UNIQUE,
+ password_hash BYTEA NOT NULL, password_salt BYTEA NOT NULL,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS categories (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ name TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0, UNIQUE(user_id, name), UNIQUE(id,user_id)
+);
+CREATE TABLE IF NOT EXISTS payment_methods (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ name TEXT NOT NULL, UNIQUE(user_id,name), UNIQUE(id,user_id)
+);
+CREATE TABLE IF NOT EXISTS expenses (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ category_id BIGINT, payment_method_id BIGINT, card_id BIGINT, statement_id BIGINT,
+ installments_count INTEGER NOT NULL DEFAULT 1,
+ amount_minor BIGINT NOT NULL CHECK(amount_minor>0),
+ currency TEXT NOT NULL DEFAULT 'TRY' CHECK(currency='TRY'),
+ spent_on TEXT NOT NULL, description TEXT NOT NULL,
+ note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ FOREIGN KEY(category_id,user_id) REFERENCES categories(id,user_id),
+ FOREIGN KEY(payment_method_id,user_id) REFERENCES payment_methods(id,user_id)
+);
+CREATE TABLE IF NOT EXISTS credit_cards (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ bank_name TEXT NOT NULL, display_name TEXT NOT NULL, nickname TEXT NOT NULL DEFAULT '',
+ last_four TEXT NOT NULL DEFAULT '', closing_day INTEGER NOT NULL CHECK(closing_day BETWEEN 1 AND 31),
+ due_day INTEGER NOT NULL CHECK(due_day BETWEEN 1 AND 31),
+ due_days_after_close INTEGER NOT NULL DEFAULT 20 CHECK(due_days_after_close BETWEEN 1 AND 90),
+ credit_limit_minor BIGINT CHECK(credit_limit_minor IS NULL OR credit_limit_minor>0),
+ opening_balance_minor BIGINT NOT NULL DEFAULT 0 CHECK(opening_balance_minor>=0),
+ active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(id,user_id)
+);
+CREATE TABLE IF NOT EXISTS card_statements (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, card_id BIGINT NOT NULL,
+ period_start TEXT NOT NULL, closing_on TEXT NOT NULL, due_on TEXT NOT NULL,
+ dates_manually_corrected INTEGER NOT NULL DEFAULT 0 CHECK(dates_manually_corrected IN (0,1)),
+ UNIQUE(card_id,period_start),
+ FOREIGN KEY(card_id,user_id) REFERENCES credit_cards(id,user_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS card_repayments (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, card_id BIGINT NOT NULL,
+ statement_id BIGINT, amount_minor BIGINT NOT NULL CHECK(amount_minor>0),
+ paid_on TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ FOREIGN KEY(card_id,user_id) REFERENCES credit_cards(id,user_id) ON DELETE CASCADE,
+ FOREIGN KEY(statement_id) REFERENCES card_statements(id) ON DELETE SET NULL
+);
+CREATE TABLE IF NOT EXISTS installment_plans (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, expense_id BIGINT NOT NULL UNIQUE,
+ card_id BIGINT NOT NULL, original_minor BIGINT NOT NULL CHECK(original_minor>0),
+ count INTEGER NOT NULL CHECK(count BETWEEN 2 AND 120), first_on TEXT NOT NULL,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ FOREIGN KEY(expense_id) REFERENCES expenses(id) ON DELETE CASCADE,
+ FOREIGN KEY(card_id,user_id) REFERENCES credit_cards(id,user_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS installment_occurrences (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, plan_id BIGINT NOT NULL,
+ ordinal INTEGER NOT NULL, due_on TEXT NOT NULL,
+ amount_minor BIGINT NOT NULL CHECK(amount_minor>0),
+ status TEXT NOT NULL DEFAULT 'unpaid' CHECK(status IN ('unpaid','paid','cancelled')),
+ paid_on TEXT, statement_id BIGINT,
+ UNIQUE(plan_id,ordinal),
+ FOREIGN KEY(plan_id) REFERENCES installment_plans(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS card_statements_user_card ON card_statements(user_id,card_id,closing_on);
+CREATE INDEX IF NOT EXISTS card_repayments_user_card ON card_repayments(user_id,card_id,paid_on);
+CREATE INDEX IF NOT EXISTS expenses_user_date ON expenses(user_id,spent_on);
+CREATE TABLE IF NOT EXISTS budgets (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ month TEXT NOT NULL, category_id BIGINT, amount_minor BIGINT NOT NULL CHECK(amount_minor>=0),
+ UNIQUE(user_id,month,category_id),
+ FOREIGN KEY(category_id,user_id) REFERENCES categories(id,user_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS budget_overall_unique ON budgets(user_id,month) WHERE category_id IS NULL;
+CREATE TABLE IF NOT EXISTS recurring_expenses (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ category_id BIGINT, payment_method_id BIGINT,
+ amount_minor BIGINT NOT NULL CHECK(amount_minor>0),
+ description TEXT NOT NULL,
+ frequency TEXT NOT NULL CHECK(frequency IN ('weekly','monthly','yearly')),
+ start_on TEXT NOT NULL, end_on TEXT,
+ status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','paused','cancelled')),
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(id,user_id),
+ FOREIGN KEY(category_id,user_id) REFERENCES categories(id,user_id),
+ FOREIGN KEY(payment_method_id,user_id) REFERENCES payment_methods(id,user_id)
+);
+CREATE INDEX IF NOT EXISTS recurring_user_status ON recurring_expenses(user_id,status);
+CREATE TABLE IF NOT EXISTS recurring_occurrences (
+ id BIGSERIAL PRIMARY KEY, recurring_id BIGINT NOT NULL, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ scheduled_on TEXT NOT NULL, expense_id BIGINT REFERENCES expenses(id) ON DELETE SET NULL,
+ paid_on TEXT NOT NULL, UNIQUE(recurring_id,scheduled_on),
+ FOREIGN KEY(recurring_id,user_id) REFERENCES recurring_expenses(id,user_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS sessions (
+ token_hash TEXT PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ csrf_token TEXT NOT NULL, expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auth_failures (
+ source_hash TEXT NOT NULL, scope TEXT NOT NULL,
+ occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS auth_failures_window ON auth_failures(source_hash,scope,occurred_at);
+CREATE TABLE IF NOT EXISTS invitations (
+ id BIGSERIAL PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, expires_at TEXT NOT NULL,
+ used_at TEXT, revoked_at TEXT
+);
+CREATE TABLE IF NOT EXISTS income_rules (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ category_id BIGINT,
+ income_type TEXT NOT NULL CHECK(income_type IN ('salary','additional','bonus','freelance','refund','other')),
+ description TEXT NOT NULL,
+ frequency TEXT NOT NULL CHECK(frequency IN ('daily','weekly','monthly','yearly')),
+ schedule_mode TEXT NOT NULL DEFAULT 'anchored' CHECK(schedule_mode IN ('anchored','last_day')),
+ start_on TEXT NOT NULL, end_on TEXT,
+ status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','paused','cancelled')),
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(id,user_id)
+);
+CREATE TABLE IF NOT EXISTS income_rule_amounts (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, rule_id BIGINT NOT NULL,
+ effective_on TEXT NOT NULL, amount_minor BIGINT NOT NULL CHECK(amount_minor>0),
+ UNIQUE(rule_id,effective_on),
+ FOREIGN KEY(rule_id,user_id) REFERENCES income_rules(id,user_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS income_records (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ rule_id BIGINT, category_id BIGINT,
+ income_type TEXT NOT NULL CHECK(income_type IN ('salary','additional','bonus','freelance','refund','other')),
+ description TEXT NOT NULL,
+ amount_minor BIGINT NOT NULL CHECK(amount_minor>0),
+ currency TEXT NOT NULL DEFAULT 'TRY' CHECK(currency='TRY'),
+ expected_on TEXT NOT NULL, received_on TEXT,
+ status TEXT NOT NULL DEFAULT 'expected' CHECK(status IN ('expected','received','cancelled')),
+ note TEXT NOT NULL DEFAULT '',
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(rule_id,expected_on),
+ FOREIGN KEY(rule_id,user_id) REFERENCES income_rules(id,user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS income_records_user_date ON income_records(user_id,expected_on);
+CREATE INDEX IF NOT EXISTS income_rules_user_status ON income_rules(user_id,status);
+CREATE TABLE IF NOT EXISTS cash_settings (
+ user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ opening_balance_minor BIGINT NOT NULL CHECK(opening_balance_minor>=0),
+ effective_on TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS cash_adjustments (
+ id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ adjustment_on TEXT NOT NULL, amount_minor BIGINT NOT NULL CHECK(amount_minor!=0),
+ description TEXT NOT NULL CHECK(length(description) BETWEEN 1 AND 160),
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(id,user_id)
+);
+CREATE INDEX IF NOT EXISTS cash_adjustments_user_date ON cash_adjustments(user_id,adjustment_on,id);
+"""
+
+
+def _apply_pg_schema(db):
+    """Apply the PostgreSQL schema idempotently using CREATE TABLE IF NOT EXISTS."""
+    from pg_compat import _split_script, _translate_sql
+    statements = _split_script(PG_SCHEMA)
+    for stmt in statements:
+        translated = _translate_sql(stmt)
+        if translated:
+            try:
+                db._conn.cursor().execute(translated)
+                db._conn.commit()
+            except Exception:
+                db._conn.rollback()
 
 
 def _migrate_income_daily_frequency(db):
@@ -1541,8 +1747,8 @@ def record_card_repayment(user_id: int, card_id: int, data: dict):
         outstanding = int(db.execute("SELECT opening_balance_minor+COALESCE((SELECT SUM(amount_minor) FROM expenses WHERE user_id=? AND card_id=?),0)-COALESCE((SELECT SUM(amount_minor) FROM card_repayments WHERE user_id=? AND card_id=?),0) FROM credit_cards WHERE id=? AND user_id=?", (user_id,card_id,user_id,card_id,card_id,user_id)).fetchone()[0])
         if amount > outstanding:
             raise ValueError("repayment exceeds outstanding balance")
-        db.execute("INSERT INTO card_repayments(user_id,card_id,statement_id,amount_minor,paid_on,note) VALUES(?,?,?,?,?,?)", (user_id,card_id,statement_id,amount,paid_value,note.strip()))
-        return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        cur = db.execute("INSERT INTO card_repayments(user_id,card_id,statement_id,amount_minor,paid_on,note) VALUES(?,?,?,?,?,?)", (user_id,card_id,statement_id,amount,paid_value,note.strip()))
+        return cur.lastrowid
 
 
 def _create_installment_plan_in_db(db, user_id: int, expense_id: int, count: int, first_on_value: str):
@@ -1556,7 +1762,8 @@ def _create_installment_plan_in_db(db, user_id: int, expense_id: int, count: int
         raise ValueError("first installment cannot precede the purchase")
     if db.execute("SELECT 1 FROM installment_plans WHERE expense_id=?", (expense_id,)).fetchone():
         return 0
-    plan_id = db.execute("INSERT INTO installment_plans(user_id,expense_id,card_id,original_minor,count,first_on) VALUES(?,?,?,?,?,?)", (user_id,expense_id,expense["card_id"],expense["amount_minor"],count,first_on_value)).lastrowid
+    cur = db.execute("INSERT INTO installment_plans(user_id,expense_id,card_id,original_minor,count,first_on) VALUES(?,?,?,?,?,?)", (user_id,expense_id,expense["card_id"],expense["amount_minor"],count,first_on_value))
+    plan_id = cur.lastrowid
     base, remainder = divmod(int(expense["amount_minor"]), count)
     for ordinal in range(count):
         month0 = first_on.year * 12 + first_on.month - 1 + ordinal
