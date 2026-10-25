@@ -13,7 +13,7 @@ python3 app.py
 
 ## Vercel free deployment
 
-Vercel's function filesystem is temporary. For a usable deployment, connect the project to Supabase through the Vercel Marketplace integration. It supplies `POSTGRES_URL`; the app prefers this serverless-compatible pooler URL over `DATABASE_URL`, which may point at Supabase's IPv6-only direct connection. The SQLite fallback under `/tmp` is only suitable for a disposable smoke test: accounts and expenses can disappear between function instances or deployments.
+Vercel's function filesystem is temporary. For a usable deployment, connect the project to Supabase through the Vercel Marketplace integration. It supplies `POSTGRES_URL`. For an application-managed database or a region migration, set the server-only Secret `EXPENSE_DATABASE_URL` to the new Supabase transaction-pooler URL. Connection priority is `EXPENSE_DATABASE_URL`, then `POSTGRES_URL`, then `DATABASE_URL`; this prevents an older Marketplace integration from redirecting a migrated app. Never commit the connection string. `vercel.json` pins Functions to Frankfurt (`fra1`), beside the Frankfurt Supabase database. The SQLite fallback under `/tmp` is only suitable for a disposable smoke test: accounts and expenses can disappear between function instances or deployments.
 
 Recommended Vercel setup:
 
