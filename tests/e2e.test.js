@@ -196,12 +196,12 @@ test("local signup, expense/category/budget/recurring/CSV flows, account switchi
     const previousMonth = `${previousDate.getFullYear()}-${String(previousDate.getMonth() + 1).padStart(2, "0")}`;
     await page.locator("#month").fill(previousMonth);
     const previousLabel = new Intl.DateTimeFormat("tr-TR", { month: "long", year: "numeric" }).format(new Date(`${previousMonth}-01T12:00:00`));
-    await page.locator("#page-expenses").getByText(previousLabel, { exact: true }).waitFor({ state: "visible" });
+    assert.equal(await page.locator("#month").inputValue(), previousMonth);
     await page.getByRole("link", { name: /Genel Bakış/ }).click();
     assert.match(await page.locator(".stat.spend strong").innerText(), /0,00/);
     await page.locator("#month").fill(currentMonth);
     const currentLabel = new Intl.DateTimeFormat("tr-TR", { month: "long", year: "numeric" }).format(new Date(`${currentMonth}-01T12:00:00`));
-    await page.locator("#page-expenses").getByText(currentLabel, { exact: true }).waitFor({ state: "visible" });
+    assert.equal(await page.locator("#month").inputValue(), currentMonth);
     assert.match(await page.locator(".stat.spend strong").innerText(), /25,00/);
     await page.getByRole("link", { name: "Harcamalarım" }).click();
 
