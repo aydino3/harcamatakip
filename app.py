@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 35259)
-Total output lines: 2255
-
 """Expense tracker business logic and SQLite/PostgreSQL persistence."""
 from __future__ import annotations
 
@@ -692,7 +689,946 @@ def _ensure_backup_dir():
     _assert_outside_static(resolved)
     if not resolved.is_dir():
         raise ValueError("Backup location is not a directory.")
-  …15259 tokens truncated…lta(days=1)
+    if os.name != "nt":
+        os.chmod(resolved, 0o700)
+    return resolved
+
+
+def _readonly_connection(path: Path):
+    return sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+
+
+def validate_database(path: Path, required_schema=None):
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Database file is missing or is a symbolic link.")
+    _assert_outside_static(path)
+    db = None
+    try:
+        db = _readonly_connection(path)
+        integrity = [row[0] for row in db.execute("PRAGMA integrity_check").fetchall()]
+        if integrity != ["ok"]:
+            raise ValueError("Database integrity check failed.")
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        required_schema = REQUIRED_SCHEMA if required_schema is None else required_schema
+        if set(required_schema) - tables:
+            raise ValueError("Database schema is incompatible; required tables are missing.")
+        for table, required_columns in required_schema.items():
+            columns = {row[1] for row in db.execute(f'PRAGMA table_info("{table}")')}
+            if required_columns - columns:
+                raise ValueError("Database schema is incompatible; required columns are missing.")
+        if db.execute("PRAGMA foreign_key_check").fetchone():
+            raise ValueError("Database contains foreign-key violations.")
+    except sqlite3.DatabaseError as error:
+        raise ValueError("Database file is invalid or corrupted.") from error
+    finally:
+        if db is not None:
+            db.close()
+    return True
+
+
+def _copy_database_snapshot(source_path: Path, destination_path: Path):
+    if not destination_path.exists():
+        descriptor = os.open(destination_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        os.close(descriptor)
+    elif destination_path.is_symlink():
+        raise ValueError("Temporary database path must not be a symbolic link.")
+    if os.name != "nt":
+        os.chmod(destination_path, 0o600)
+    source = _readonly_connection(source_path)
+    destination = None
+    try:
+        destination = sqlite3.connect(destination_path)
+        source.backup(destination, pages=256, sleep=0.01)
+        destination.commit()
+    finally:
+        if destination is not None:
+            destination.close()
+        source.close()
+    if os.name != "nt":
+        os.chmod(destination_path, 0o600)
+
+
+def _private_temp_path(suffix: str):
+    descriptor, name = tempfile.mkstemp(prefix="expense-private-", suffix=suffix)
+    os.close(descriptor)
+    return Path(name)
+
+
+def _backup_encryption_key():
+    encoded = os.environ.get("EXPENSE_BACKUP_KEY", "").strip()
+    if not encoded:
+        raise ValueError("EXPENSE_BACKUP_KEY must be set to create or restore an encrypted backup.")
+    try:
+        key = base64.b64decode(encoded.encode("ascii"), altchars=b"-_", validate=True)
+    except (ValueError, UnicodeEncodeError) as error:
+        raise ValueError("EXPENSE_BACKUP_KEY must be a URL-safe base64-encoded 32-byte key.") from error
+    if len(key) != 32:
+        raise ValueError("EXPENSE_BACKUP_KEY must be a URL-safe base64-encoded 32-byte key.")
+    return key
+
+
+def _encrypt_file(source: Path, destination: Path, key: bytes):
+    nonce = secrets.token_bytes(12)
+    encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
+    encryptor.authenticate_additional_data(ENCRYPTED_BACKUP_AAD)
+    with source.open("rb") as input_file, destination.open("xb") as output_file:
+        output_file.write(ENCRYPTED_BACKUP_MAGIC + nonce)
+        while chunk := input_file.read(1024 * 1024):
+            output_file.write(encryptor.update(chunk))
+        output_file.write(encryptor.finalize())
+        output_file.write(encryptor.tag)
+        output_file.flush()
+        os.fsync(output_file.fileno())
+
+
+def _decrypt_file(source: Path, destination: Path, key: bytes):
+    minimum_size = len(ENCRYPTED_BACKUP_MAGIC) + 12 + 16
+    size = source.stat().st_size
+    if size < minimum_size:
+        raise ValueError("Encrypted backup is truncated or invalid.")
+    with source.open("rb") as input_file:
+        header = input_file.read(len(ENCRYPTED_BACKUP_MAGIC) + 12)
+        if len(header) != len(ENCRYPTED_BACKUP_MAGIC) + 12 or not header.startswith(ENCRYPTED_BACKUP_MAGIC):
+            raise ValueError("Selected file is not a supported encrypted backup.")
+        nonce = header[len(ENCRYPTED_BACKUP_MAGIC):]
+        input_file.seek(size - 16)
+        tag = input_file.read(16)
+        input_file.seek(len(header))
+        decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
+        decryptor.authenticate_additional_data(ENCRYPTED_BACKUP_AAD)
+        remaining = size - len(header) - 16
+        with destination.open("wb") as output_file:
+            if os.name != "nt":
+                os.chmod(destination, 0o600)
+            while remaining:
+                chunk = input_file.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise ValueError("Encrypted backup is truncated or invalid.")
+                remaining -= len(chunk)
+                output_file.write(decryptor.update(chunk))
+            try:
+                output_file.write(decryptor.finalize())
+            except Exception as error:
+                raise ValueError("Encrypted backup authentication failed; check the key and file integrity.") from error
+            output_file.flush()
+            os.fsync(output_file.fileno())
+
+
+def create_backup(encrypted=False):
+    source_path = DB_PATH
+    if source_path.is_symlink() or not source_path.is_file():
+        raise ValueError("Active database file does not exist or is a symbolic link.")
+    validate_database(source_path)
+    backup_dir = _ensure_backup_dir()
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if encrypted:
+        key = _backup_encryption_key()
+    filename = f"expenses-{stamp}-{secrets.token_hex(4)}.sqlite3" + (".enc" if encrypted else "")
+    final_path = backup_dir / filename
+    temporary_path = backup_dir / f".{filename}.tmp"
+    snapshot_path = _private_temp_path(".sqlite3") if encrypted else temporary_path
+    try:
+        _copy_database_snapshot(source_path, snapshot_path)
+        validate_database(snapshot_path)
+        if encrypted:
+            _encrypt_file(snapshot_path, temporary_path, key)
+        os.replace(temporary_path, final_path)
+        if os.name != "nt":
+            os.chmod(final_path, 0o600)
+        return final_path
+    finally:
+        temporary_path.unlink(missing_ok=True)
+        if snapshot_path != temporary_path:
+            snapshot_path.unlink(missing_ok=True)
+
+
+def restore_backup(backup_path: str | Path):
+    backup_dir = _ensure_backup_dir()
+    candidate = Path(backup_path)
+    if candidate.is_symlink() or not candidate.is_file():
+        raise ValueError("Selected backup file does not exist or is a symbolic link.")
+    candidate = candidate.resolve()
+    try:
+        candidate.relative_to(backup_dir)
+    except ValueError as error:
+        raise ValueError("Restore accepts backup files only from the configured backup directory.") from error
+    _assert_outside_static(candidate)
+    active_path = DB_PATH
+    if active_path.is_symlink():
+        raise ValueError("Active database is a symbolic link; refusing to replace it.")
+    if active_path.exists() and candidate == active_path.resolve():
+        raise ValueError("Selected file is the active database, not a backup.")
+    with candidate.open("rb") as backup_file:
+        encrypted = backup_file.read(len(ENCRYPTED_BACKUP_MAGIC)) == ENCRYPTED_BACKUP_MAGIC
+    if os.environ.get("APP_ENV", "development").strip().lower() == "production" and not encrypted:
+        raise ValueError("Production restore requires an encrypted backup.")
+    for suffix in ("-wal", "-shm", "-journal"):
+        if Path(str(active_path) + suffix).exists():
+            raise ValueError("SQLite sidecar files exist. Stop the app and ensure the database is closed before restore.")
+
+    active_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary_path = active_path.parent / f".{active_path.name}.restore-{secrets.token_hex(8)}.tmp"
+    decrypted_path = _private_temp_path(".sqlite3") if encrypted else candidate
+    migration_path = None
+    try:
+        if encrypted:
+            _decrypt_file(candidate, decrypted_path, _backup_encryption_key())
+        source_path = decrypted_path
+        try:
+            validate_database(source_path)
+        except ValueError:
+            # Accept the immediately previous schema only after integrity and
+            # ownership constraints pass, then migrate a private staging copy.
+            validate_database(source_path, PRE_CARD_REQUIRED_SCHEMA)
+            migration_path = _private_temp_path(".sqlite3")
+            _copy_database_snapshot(source_path, migration_path)
+            with sqlite3.connect(migration_path) as staged_db:
+                _apply_additive_schema(staged_db)
+            validate_database(migration_path)
+            source_path = migration_path
+        recovery_backup = create_backup(encrypted=os.environ.get("APP_ENV", "development").strip().lower() == "production" or encrypted) if active_path.is_file() else None
+        _copy_database_snapshot(source_path, temporary_path)
+        validate_database(temporary_path)
+        os.replace(temporary_path, active_path)
+        return {"restored_from": candidate, "recovery_backup": recovery_backup}
+    finally:
+        temporary_path.unlink(missing_ok=True)
+        if migration_path:
+            migration_path.unlink(missing_ok=True)
+        if encrypted:
+            decrypted_path.unlink(missing_ok=True)
+
+
+def password_digest(password: str, salt: bytes) -> bytes:
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 240_000)
+
+
+DUMMY_PASSWORD_SALT = secrets.token_bytes(16)
+DUMMY_PASSWORD_HASH = password_digest(secrets.token_urlsafe(32), DUMMY_PASSWORD_SALT)
+
+
+def secure_cookie_enabled() -> bool:
+    return COOKIE_SECURE or os.environ.get("APP_ENV", "development").strip().lower() == "production"
+
+
+def month_bounds(month: str):
+    try:
+        if not isinstance(month, str) or len(month) != 7 or month[4] != "-" or not month[:4].isdigit() or not month[5:].isdigit():
+            raise ValueError
+        y, m = map(int, month.split("-"))
+        if not 1 <= m <= 12:
+            raise ValueError
+        start = date(y, m, 1)
+        end = date(y + (m == 12), 1 if m == 12 else m + 1, 1)
+        return start.isoformat(), end.isoformat()
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError("invalid month")
+
+
+class InvalidInvitation(ValueError):
+    """Raised when a private-beta invitation is invalid or unavailable."""
+
+
+def create_invitation(expires_hours=72):
+    if isinstance(expires_hours, bool) or not isinstance(expires_hours, int) or not 1 <= expires_hours <= 720:
+        raise ValueError("Invitation expiry must be between 1 and 720 hours.")
+    token = secrets.token_urlsafe(32)
+    digest = hashlib.sha256(token.encode("ascii")).hexdigest()
+    with connect() as db:
+        cursor = db.execute("INSERT INTO invitations(token_hash,expires_at) VALUES(?,datetime('now',?))",
+                            (digest, f"+{expires_hours} hours"))
+        invitation_id = cursor.lastrowid
+    return invitation_id, token
+
+
+def revoke_invitation(invitation_id):
+    if isinstance(invitation_id, bool) or not str(invitation_id).isdigit():
+        return False
+    with connect() as db:
+        cursor = db.execute("UPDATE invitations SET revoked_at=CURRENT_TIMESTAMP WHERE id=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>datetime('now')",
+                            (int(invitation_id),))
+    return cursor.rowcount == 1
+
+
+def create_user(email: str, password: str, invitation_token=None, require_invitation=None) -> int:
+    if not isinstance(email, str) or not isinstance(password, str):
+        raise ValueError("invalid credentials")
+    email = email.strip().lower()
+    if len(email) > 254 or email.count("@") != 1 or email.startswith("@") or email.endswith("@") or any(ch.isspace() for ch in email) or len(password) < 10 or len(password) > 256:
+        raise ValueError("invalid credentials")
+    configured_beta = private_beta_enabled(strict=os.environ.get("APP_ENV", "development").strip().lower() == "production")
+    require_invitation = configured_beta or require_invitation is True
+    if require_invitation and (not isinstance(invitation_token, str) or not 20 <= len(invitation_token) <= 256):
+        raise InvalidInvitation("invalid invitation")
+    token_hash = hashlib.sha256(invitation_token.encode("utf-8")).hexdigest() if require_invitation else None
+    salt = secrets.token_bytes(16)
+    with connect() as db:
+        if require_invitation:
+            db.execute("BEGIN IMMEDIATE")
+            invitation = db.execute("SELECT id FROM invitations WHERE token_hash=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>datetime('now')", (token_hash,)).fetchone()
+            if not invitation:
+                raise InvalidInvitation("invalid invitation")
+        cur = db.execute("INSERT INTO users(email,password_hash,password_salt) VALUES(?,?,?)",
+                         (email, password_digest(password, salt), salt))
+        user_id = cur.lastrowid
+        db.executemany("INSERT INTO categories(user_id,name) VALUES(?,?)", [(user_id, n) for n in DEFAULT_CATEGORIES])
+        db.executemany("INSERT INTO payment_methods(user_id,name) VALUES(?,?)", [(user_id, n) for n in DEFAULT_METHODS])
+        if require_invitation:
+            consumed = db.execute("UPDATE invitations SET used_at=CURRENT_TIMESTAMP WHERE id=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>datetime('now')", (invitation["id"],))
+            if consumed.rowcount != 1:
+                raise InvalidInvitation("invalid invitation")
+        return user_id
+
+
+def authenticate(email: str, password: str):
+    if not isinstance(email, str) or not isinstance(password, str):
+        return None
+    if len(email) > 254 or len(password) > 256:
+        return None
+    with connect() as db:
+        row = db.execute("SELECT * FROM users WHERE email=?", (email.strip().lower(),)).fetchone()
+    salt = row["password_salt"] if row else DUMMY_PASSWORD_SALT
+    expected = row["password_hash"] if row else DUMMY_PASSWORD_HASH
+    matches = hmac.compare_digest(password_digest(password, salt), expected)
+    if not row or not matches:
+        return None
+    return row["id"]
+
+
+def create_session(user_id: int):
+    token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with connect() as db:
+        db.execute("INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at) VALUES(?,?,?,datetime('now','+7 days'))",
+                   (token_hash, user_id, csrf))
+    return token, csrf
+
+
+def revoke_session(token: str | None):
+    if not token:
+        return
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    with connect() as db:
+        db.execute("DELETE FROM sessions WHERE token_hash=?", (digest,))
+
+
+def session_user(token: str | None):
+    if not token:
+        return None
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    with connect() as db:
+        row = db.execute("SELECT user_id,csrf_token FROM sessions WHERE token_hash=? AND expires_at>datetime('now')", (digest,)).fetchone()
+    return dict(row) if row else None
+
+
+AUTH_FAILURE_LIMITS = {"login": 20, "register": 10, "account-delete": 10}
+AUTH_SOURCE_LIMITS = {"login": 100, "register": 30, "account-delete": 50}
+
+
+def _auth_source_hash(address: str, scope: str, identity: str) -> str:
+    normalized = str(identity or "").strip().casefold()
+    return hashlib.sha256(f"{scope}\0{address}\0{normalized}".encode("utf-8", "replace")).hexdigest()
+
+
+def reserve_auth_attempt(address: str, scope: str, identity: str = "") -> bool:
+    """Atomically reserve a failed-auth slot; true means this source/key is throttled."""
+    limit = AUTH_SOURCE_LIMITS[scope] if not identity else AUTH_FAILURE_LIMITS[scope]
+    source_hash = _auth_source_hash(address, scope, identity)
+    with LOCK, connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("DELETE FROM auth_failures WHERE occurred_at<datetime('now','-1 day')")
+        count = db.execute("SELECT COUNT(*) FROM auth_failures WHERE source_hash=? AND scope=? AND occurred_at>=datetime('now','-15 minutes')", (source_hash, scope)).fetchone()[0]
+        if count >= limit:
+            return True
+        db.execute("INSERT INTO auth_failures(source_hash,scope) VALUES(?,?)", (source_hash, scope))
+        return False
+
+
+def clear_auth_failures(address: str, scope: str, identity: str = ""):
+    source_hash = _auth_source_hash(address, scope, identity)
+    with connect() as db:
+        db.execute("DELETE FROM auth_failures WHERE source_hash=? AND scope=?", (source_hash, scope))
+
+
+def delete_account(user_id: int, password: str, confirmation: str) -> bool:
+    if confirmation != "SİL" or not isinstance(password, str):
+        return False
+    with connect() as db:
+        row = db.execute("SELECT email FROM users WHERE id=?", (user_id,)).fetchone()
+    if not row or authenticate(row["email"], password) != user_id:
+        return False
+    with LOCK, connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        cur = db.execute("DELETE FROM users WHERE id=?", (user_id,))
+        return bool(cur.rowcount)
+
+
+def summary(user_id: int, month: str, as_of: date | None = None):
+    as_of = as_of or date.today()
+    start, end = month_bounds(month)
+    prev_y, prev_m = map(int, month.split("-"))
+    prev_month = None if (prev_y == 1 and prev_m == 1) else (f"{prev_y-1:04d}-12" if prev_m == 1 else f"{prev_y:04d}-{prev_m-1:02d}")
+    if prev_month:
+        prev_start, prev_end = month_bounds(prev_month)
+    with connect() as db:
+        current_rows = db.execute("SELECT e.category_id,c.name,e.amount_minor FROM expenses e LEFT JOIN categories c ON c.id=e.category_id AND c.user_id=e.user_id WHERE e.user_id=? AND e.currency='TRY' AND e.spent_on>=? AND e.spent_on<?", (user_id,start,end)).fetchall()
+        prior_rows = db.execute("SELECT amount_minor FROM expenses WHERE user_id=? AND currency='TRY' AND spent_on>=? AND spent_on<?", (user_id,prev_start,prev_end)).fetchall() if prev_month else []
+        budget_row = db.execute("SELECT amount_minor FROM budgets WHERE user_id=? AND month=? AND category_id IS NULL ORDER BY id DESC LIMIT 1", (user_id,month)).fetchone()
+        budget = budget_row["amount_minor"] if budget_row else None
+        category_budgets = {r["category_id"]:r["amount_minor"] for r in db.execute("SELECT category_id,amount_minor FROM budgets WHERE user_id=? AND month=? AND category_id IS NOT NULL",(user_id,month)).fetchall()}
+        recent = db.execute("SELECT e.id,e.amount_minor,e.currency,e.spent_on,e.description,c.name category,p.name payment_method FROM expenses e LEFT JOIN categories c ON c.id=e.category_id AND c.user_id=e.user_id LEFT JOIN payment_methods p ON p.id=e.payment_method_id AND p.user_id=e.user_id WHERE e.user_id=? AND e.currency='TRY' ORDER BY e.spent_on DESC,e.id DESC LIMIT 8", (user_id,)).fetchall()
+    spent = sum(int(r["amount_minor"]) for r in current_rows)
+    prior = sum(int(r["amount_minor"]) for r in prior_rows)
+    grouped = {}
+    for row in current_rows:
+        category_id = row["category_id"]
+        key = category_id
+        if key not in grouped:
+            grouped[key] = {"id":category_id,"name":row["name"] or "Kategorisiz","amount_minor":0,"budget_minor":category_budgets.get(category_id)}
+        grouped[key]["amount_minor"] += int(row["amount_minor"])
+    by_category = sorted(grouped.values(),key=lambda r:r["amount_minor"],reverse=True)
+    for category in by_category:
+        category["budget_percent"] = None if category["budget_minor"] is None else (100 if category["budget_minor"] == 0 and category["amount_minor"] else 0 if category["budget_minor"] == 0 else round(category["amount_minor"] * 100 / category["budget_minor"]))
+        category["budget_status"] = None if category["budget_percent"] is None else "over" if category["budget_percent"] >= 100 else "near" if category["budget_percent"] >= 80 else "ok"
+    forecast = None
+    if month == as_of.strftime("%Y-%m") and as_of.day >= 5 and spent:
+        days = calendar.monthrange(as_of.year, as_of.month)[1]
+        forecast = (spent * days + as_of.day // 2) // as_of.day
+    forecast_reason = "available" if forecast is not None else "not_current_month" if month != as_of.strftime("%Y-%m") else "insufficient_days" if as_of.day < 5 else "no_spending"
+    income_overview(user_id, month, as_of)
+    income = income_totals(user_id, month, as_of)
+    return {"month":month,"spent_minor":spent,"budget_minor":budget,"remaining_minor":budget-spent if budget is not None else None,
+            "percent":(100 if spent else 0) if budget == 0 else (round(spent*100/budget) if budget is not None else None),"previous_minor":prior,"change_minor":spent-prior,
+            "categories":[dict(r) for r in by_category],"recent":[dict(r) for r in recent],
+            "month_end_estimate_minor":forecast,"estimate_reason":forecast_reason,
+            "income_received_minor":income["received_minor"],"income_expected_minor":income["expected_minor"]}
+
+
+INCOME_TYPES = {"salary", "additional", "bonus", "freelance", "refund", "other"}
+
+
+def income_recurrence_date(start_on: date, frequency: str, index: int, schedule_mode="anchored") -> date:
+    """Return a stable scheduled date; salary rules may use calendar month-end."""
+    if index < 0 or frequency not in ("daily", "weekly", "monthly", "yearly"):
+        raise ValueError("invalid income recurrence")
+    if frequency == "daily":
+        return start_on + timedelta(days=index)
+    if frequency == "weekly":
+        return start_on + timedelta(days=7 * index)
+    if frequency == "monthly":
+        month_index = start_on.year * 12 + start_on.month - 1 + index
+        year, month0 = divmod(month_index, 12)
+        month = month0 + 1
+        day = calendar.monthrange(year, month)[1] if schedule_mode == "last_day" else min(start_on.day, calendar.monthrange(year, month)[1])
+        return date(year, month, day)
+    year = start_on.year + index
+    return date(year, start_on.month, min(start_on.day, calendar.monthrange(year, start_on.month)[1]))
+
+
+def income_recurrence_index(start_on: date, frequency: str, target: date, schedule_mode="anchored") -> int:
+    if target <= start_on:
+        return 0
+    if frequency == "daily":
+        return (target - start_on).days
+    if frequency == "weekly":
+        return (target - start_on).days // 7
+    if frequency == "monthly":
+        index = max(0, (target.year - start_on.year) * 12 + target.month - start_on.month)
+    elif frequency == "yearly":
+        index = max(0, target.year - start_on.year)
+    else:
+        raise ValueError("invalid income recurrence")
+    try:
+        return index if income_recurrence_date(start_on, frequency, index, schedule_mode) >= target else index + 1
+    except (ValueError, OverflowError):
+        return index
+
+
+def _valid_income_fields(data):
+    description = data.get("description")
+    income_type = data.get("income_type", "additional")
+    expected_value = data.get("expected_on") or data.get("start_on", "")
+    note = data.get("note", "")
+    if not all(isinstance(value, str) for value in (description, income_type, expected_value, note)):
+        raise ValueError("invalid income fields")
+    description = description.strip()
+    expected_on = date.fromisoformat(expected_value)
+    if expected_on.isoformat() != expected_value or not description or len(description) > 160 or len(note) > 1000 or income_type not in INCOME_TYPES:
+        raise ValueError("invalid income")
+    amount_minor = money_to_minor(data.get("amount"))
+    if amount_minor <= 0 or amount_minor > MAX_MINOR:
+        raise ValueError("invalid income amount")
+    category_id = record_id(data.get("category_id"))
+    return description, income_type, expected_on, note, amount_minor, category_id
+
+
+def save_income(user_id: int, data: dict) -> int:
+    """Create or edit a one-time expected income record."""
+    description, income_type, expected_on, note, amount_minor, category_id = _valid_income_fields(data)
+    income_id = record_id(data.get("id"))
+    with connect() as db:
+        if category_id and not db.execute("SELECT 1 FROM categories WHERE id=? AND user_id=? AND archived=0", (category_id, user_id)).fetchone():
+            raise ValueError("invalid income category")
+        if income_id:
+            row = db.execute("SELECT status,rule_id FROM income_records WHERE id=? AND user_id=?", (income_id, user_id)).fetchone()
+            if not row or row["rule_id"] is not None or row["status"] != "expected":
+                return 0
+            db.execute("UPDATE income_records SET category_id=?,income_type=?,description=?,amount_minor=?,expected_on=?,note=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?",
+                       (category_id, income_type, description, amount_minor, expected_on.isoformat(), note, income_id, user_id))
+            return income_id
+        cur = db.execute("INSERT INTO income_records(user_id,category_id,income_type,description,amount_minor,expected_on,note,status) VALUES(?,?,?,?,?,?,?, 'expected')",
+                         (user_id, category_id, income_type, description, amount_minor, expected_on.isoformat(), note))
+        return cur.lastrowid
+
+
+def save_income_rule(user_id: int, data: dict) -> int:
+    description, income_type, start_on, note, amount_minor, category_id = _valid_income_fields(data)
+    end_value = data.get("end_on") or None
+    if end_value is not None and not isinstance(end_value, str):
+        raise ValueError("invalid end date")
+    end_on = date.fromisoformat(end_value) if end_value else None
+    if end_value and end_on.isoformat() != end_value or end_on and end_on < start_on:
+        raise ValueError("invalid end date")
+    frequency = data.get("frequency")
+    if frequency not in ("daily", "weekly", "monthly", "yearly"):
+        raise ValueError("invalid frequency")
+    default_mode = "last_day" if income_type == "salary" and frequency == "monthly" else "anchored"
+    schedule_mode = data.get("schedule_mode", default_mode)
+    if schedule_mode not in ("anchored", "last_day") or schedule_mode == "last_day" and frequency != "monthly":
+        raise ValueError("invalid schedule mode")
+    if income_type == "salary" and frequency == "monthly" and "schedule_mode" not in data:
+        schedule_mode = "last_day"
+    rule_id = record_id(data.get("id"))
+    with connect() as db:
+        if category_id and not db.execute("SELECT 1 FROM categories WHERE id=? AND user_id=? AND archived=0", (category_id, user_id)).fetchone():
+            raise ValueError("invalid income category")
+        if rule_id:
+            existing = db.execute("SELECT status FROM income_rules WHERE id=? AND user_id=?", (rule_id, user_id)).fetchone()
+            if not existing or existing["status"] == "cancelled":
+                return 0
+            db.execute("UPDATE income_rules SET category_id=?,income_type=?,description=?,frequency=?,schedule_mode=?,start_on=?,end_on=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?",
+                       (category_id, income_type, description, frequency, schedule_mode, start_on.isoformat(), end_value, rule_id, user_id))
+            effective_on = max(date.today(), start_on).isoformat()
+            db.execute("INSERT INTO income_rule_amounts(user_id,rule_id,effective_on,amount_minor) VALUES(?,?,?,?) ON CONFLICT(rule_id,effective_on) DO UPDATE SET amount_minor=excluded.amount_minor",
+                       (user_id, rule_id, effective_on, amount_minor))
+            # Settings only affect future, unreceived projections. Historical or
+            # already-confirmed records are deliberately retained unchanged.
+            db.execute("DELETE FROM income_records WHERE user_id=? AND rule_id=? AND status='expected' AND expected_on>=?", (user_id, rule_id, effective_on))
+            return rule_id
+        cur = db.execute("INSERT INTO income_rules(user_id,category_id,income_type,description,frequency,schedule_mode,start_on,end_on) VALUES(?,?,?,?,?,?,?,?)",
+                         (user_id, category_id, income_type, description, frequency, schedule_mode, start_on.isoformat(), end_value))
+        rule_id = cur.lastrowid
+        db.execute("INSERT INTO income_rule_amounts(user_id,rule_id,effective_on,amount_minor) VALUES(?,?,?,?)", (user_id, rule_id, start_on.isoformat(), amount_minor))
+        return rule_id
+
+
+def set_income_rule_amount(user_id: int, rule_id: int, effective_value: str, amount: str) -> bool:
+    effective_on = date.fromisoformat(effective_value)
+    if effective_on.isoformat() != effective_value or effective_on < date.today():
+        raise ValueError("effective date must be today or later")
+    amount_minor = money_to_minor(amount)
+    if amount_minor <= 0 or amount_minor > MAX_MINOR:
+        raise ValueError("invalid income amount")
+    with connect() as db:
+        rule = db.execute("SELECT id FROM income_rules WHERE id=? AND user_id=? AND status='active'", (rule_id, user_id)).fetchone()
+        if not rule:
+            return False
+        db.execute("INSERT INTO income_rule_amounts(user_id,rule_id,effective_on,amount_minor) VALUES(?,?,?,?) ON CONFLICT(rule_id,effective_on) DO UPDATE SET amount_minor=excluded.amount_minor", (user_id, rule_id, effective_value, amount_minor))
+        db.execute("DELETE FROM income_records WHERE user_id=? AND rule_id=? AND status='expected' AND expected_on>=?", (user_id, rule_id, effective_value))
+        return True
+
+
+def set_income_rule_status(user_id: int, rule_id: int, status: str) -> bool:
+    if status not in ("active", "paused", "cancelled"):
+        raise ValueError("invalid income rule status")
+    with connect() as db:
+        row = db.execute("SELECT status FROM income_rules WHERE id=? AND user_id=?", (rule_id, user_id)).fetchone()
+        if not row:
+            return False
+        if row["status"] == "cancelled":
+            return status == "cancelled"
+        db.execute("UPDATE income_rules SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?", (status, rule_id, user_id))
+        if status == "cancelled":
+            db.execute("UPDATE income_records SET status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE user_id=? AND rule_id=? AND status='expected'", (user_id, rule_id))
+        return True
+
+
+def set_income_status(user_id: int, income_id: int, status: str, received_value=None) -> bool:
+    if status not in ("received", "cancelled"):
+        raise ValueError("invalid income status")
+    received_on = None
+    if status == "received":
+        received_on = date.fromisoformat(received_value or date.today().isoformat())
+        if received_on.isoformat() != (received_value or date.today().isoformat()) or received_on > date.today():
+            raise ValueError("invalid receipt date")
+    with connect() as db:
+        row = db.execute("SELECT status FROM income_records WHERE id=? AND user_id=?", (income_id, user_id)).fetchone()
+        if not row or row["status"] == "cancelled" or row["status"] == "received" and status != "received":
+            return False
+        db.execute("UPDATE income_records SET status=?,received_on=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?", (status, received_on.isoformat() if received_on else None, income_id, user_id))
+        return True
+
+
+def delete_income(user_id: int, income_id: int) -> bool:
+    with connect() as db:
+        row = db.execute("SELECT rule_id,status FROM income_records WHERE id=? AND user_id=?", (income_id, user_id)).fetchone()
+        if not row or row["rule_id"] is not None or row["status"] == "received":
+            return False
+        cur = db.execute("DELETE FROM income_records WHERE id=? AND user_id=? AND status!='received'", (income_id, user_id))
+        return bool(cur.rowcount)
+
+
+def income_totals(user_id: int, month: str, as_of: date | None = None):
+    start, end = month_bounds(month)
+    as_of = as_of or date.today()
+    with connect() as db:
+        rows = db.execute("SELECT r.amount_minor,r.status,r.expected_on,r.received_on FROM income_records r LEFT JOIN income_rules q ON q.id=r.rule_id AND q.user_id=r.user_id WHERE r.user_id=? AND r.status!='cancelled' AND (r.rule_id IS NULL OR q.status='active') AND ((r.status='received' AND r.received_on>=? AND r.received_on<?) OR (r.status='expected' AND r.expected_on>=? AND r.expected_on<?))", (user_id,start,end,start,end)).fetchall()
+    received = sum(int(row["amount_minor"]) for row in rows if row["status"] == "received")
+    expected = sum(int(row["amount_minor"]) for row in rows if row["status"] == "expected" and row["expected_on"] >= as_of.isoformat())
+    return {"received_minor": received, "expected_minor": expected}
+
+
+def income_overview(user_id: int, month: str, as_of: date | None = None):
+    as_of = as_of or date.today()
+    month_start, month_end = month_bounds(month)
+    window_start = date.fromisoformat(month_start)
+    window_end = date.fromisoformat(month_end)
+    if month >= as_of.strftime("%Y-%m"):
+        window_end = max(window_end, as_of + timedelta(days=46))
+    with LOCK, connect() as db:
+        rules = db.execute("SELECT q.*, (SELECT amount_minor FROM income_rule_amounts a WHERE a.rule_id=q.id AND a.user_id=q.user_id AND a.effective_on<=? ORDER BY a.effective_on DESC LIMIT 1) amount_minor, (SELECT amount_minor FROM income_rule_amounts a WHERE a.rule_id=q.id AND a.user_id=q.user_id AND a.effective_on>? ORDER BY a.effective_on LIMIT 1) next_amount_minor, (SELECT effective_on FROM income_rule_amounts a WHERE a.rule_id=q.id AND a.user_id=q.user_id AND a.effective_on>? ORDER BY a.effective_on LIMIT 1) next_effective_on FROM income_rules q WHERE user_id=? ORDER BY status,description", (as_of.isoformat(), as_of.isoformat(), as_of.isoformat(), user_id)).fetchall()
+        for rule in rules:
+            if rule["status"] != "active":
+                continue
+            start_on = date.fromisoformat(rule["start_on"])
+            end_on = date.fromisoformat(rule["end_on"]) if rule["end_on"] else None
+            from_date = max(start_on, window_start)
+            index = income_recurrence_index(start_on, rule["frequency"], from_date, rule["schedule_mode"])
+            while True:
+                try:
+                    occurrence = income_recurrence_date(start_on, rule["frequency"], index, rule["schedule_mode"])
+                except (ValueError, OverflowError):
+                    break
+                if occurrence >= window_end or end_on and occurrence > end_on:
+                    break
+                if occurrence >= window_start:
+                    amount_row = db.execute("SELECT amount_minor FROM income_rule_amounts WHERE user_id=? AND rule_id=? AND effective_on<=? ORDER BY effective_on DESC LIMIT 1", (user_id, rule["id"], occurrence.isoformat())).fetchone()
+                    if amount_row:
+                        db.execute("INSERT OR IGNORE INTO income_records(user_id,rule_id,category_id,income_type,description,amount_minor,expected_on) VALUES(?,?,?,?,?,?,?)",
+                                   (user_id, rule["id"], rule["category_id"], rule["income_type"], rule["description"], amount_row["amount_minor"], occurrence.isoformat()))
+                index += 1
+        rows = db.execute("SELECT r.*,u.status status_rule,c.name category FROM income_records r LEFT JOIN income_rules u ON u.id=r.rule_id AND u.user_id=r.user_id LEFT JOIN categories c ON c.id=r.category_id AND c.user_id=r.user_id WHERE r.user_id=? AND r.expected_on>=? AND r.expected_on<? ORDER BY r.expected_on,r.id", (user_id,month_start,window_end.isoformat())).fetchall()
+        rules = db.execute("SELECT q.*, (SELECT amount_minor FROM income_rule_amounts a WHERE a.rule_id=q.id AND a.user_id=q.user_id AND a.effective_on<=? ORDER BY a.effective_on DESC LIMIT 1) amount_minor, (SELECT amount_minor FROM income_rule_amounts a WHERE a.rule_id=q.id AND a.user_id=q.user_id AND a.effective_on>? ORDER BY a.effective_on LIMIT 1) next_amount_minor, (SELECT effective_on FROM income_rule_amounts a WHERE a.rule_id=q.id AND a.user_id=q.user_id AND a.effective_on>? ORDER BY a.effective_on LIMIT 1) next_effective_on FROM income_rules q WHERE user_id=? ORDER BY status,description", (as_of.isoformat(), as_of.isoformat(), as_of.isoformat(), user_id)).fetchall()
+    records=[]
+    for raw in rows:
+        item=dict(raw)
+        item.pop("status_rule",None)
+        item["category"] = item.get("category") or ""
+        if item["rule_id"] and item.get("status") == "expected":
+            rule_status = raw["status_rule"]
+            if rule_status != "active":
+                item["status"] = rule_status
+            elif item["expected_on"] < as_of.isoformat():
+                item["status"] = "overdue"
+        records.append(item)
+    totals=income_totals(user_id,month,as_of)
+    return {"records":records,"rules":[dict(r) for r in rules],**totals}
+
+
+def save_opening_cash(user_id: int, amount: str, effective_value: str):
+    """Set the confirmed cash-and-bank balance that anchors subsequent cash accounting."""
+    amount_minor = money_to_minor(amount)
+    effective_on = date.fromisoformat(effective_value)
+    if amount_minor < 0 or amount_minor > MAX_MINOR or effective_on.isoformat() != effective_value or effective_on > date.today():
+        raise ValueError("invalid opening cash")
+    with connect() as db:
+        db.execute("INSERT INTO cash_settings(user_id,opening_balance_minor,effective_on) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET opening_balance_minor=excluded.opening_balance_minor,effective_on=excluded.effective_on,updated_at=CURRENT_TIMESTAMP",
+                   (user_id, amount_minor, effective_value))
+    return get_cash_position(user_id)
+
+
+def add_cash_adjustment(user_id: int, amount: str, adjustment_value: str, description: str):
+    if not isinstance(amount, (str, int)) or isinstance(amount, bool) or not isinstance(description, str):
+        raise ValueError("invalid cash adjustment")
+    raw = str(amount).strip()
+    sign = -1 if raw.startswith("-") else 1
+    if raw[:1] in ("-", "+"):
+        raw = raw[1:]
+    amount_minor = sign * money_to_minor(raw)
+    adjustment_on = date.fromisoformat(adjustment_value)
+    description = description.strip()
+    if not amount_minor or abs(amount_minor) > MAX_MINOR or adjustment_on.isoformat() != adjustment_value or adjustment_on > date.today() or not description or len(description) > 160:
+        raise ValueError("invalid cash adjustment")
+    with connect() as db:
+        settings = db.execute("SELECT effective_on FROM cash_settings WHERE user_id=?", (user_id,)).fetchone()
+        if not settings or adjustment_value < settings["effective_on"]:
+            raise ValueError("adjustment must be on or after the opening date")
+        cursor = db.execute("INSERT INTO cash_adjustments(user_id,adjustment_on,amount_minor,description) VALUES(?,?,?,?)",
+                            (user_id, adjustment_value, amount_minor, description))
+        return cursor.lastrowid
+
+
+def get_cash_position(user_id: int, as_of: date | None = None):
+    """Return confirmed balance only when an explicit opening balance anchors history."""
+    as_of = as_of or date.today()
+    with connect() as db:
+        settings = db.execute("SELECT opening_balance_minor,effective_on FROM cash_settings WHERE user_id=?", (user_id,)).fetchone()
+        adjustments = [dict(row) for row in db.execute("SELECT id,adjustment_on,amount_minor,description FROM cash_adjustments WHERE user_id=? ORDER BY adjustment_on,id", (user_id,)).fetchall()]
+        if not settings:
+            return {"configured": False, "reliable": False, "balance_minor": None, "opening_balance_minor": None, "effective_on": None, "adjustments": adjustments}
+        effective = settings["effective_on"]
+        received = db.execute("SELECT COALESCE(SUM(amount_minor),0) FROM income_records WHERE user_id=? AND status='received' AND received_on>=? AND received_on<=?", (user_id,effective,as_of.isoformat())).fetchone()[0]
+        cash_expenses = db.execute("SELECT COALESCE(SUM(amount_minor),0) FROM expenses WHERE user_id=? AND card_id IS NULL AND spent_on>=? AND spent_on<=?", (user_id,effective,as_of.isoformat())).fetchone()[0]
+        repayments = db.execute("SELECT COALESCE(SUM(amount_minor),0) FROM card_repayments WHERE user_id=? AND paid_on>=? AND paid_on<=?", (user_id,effective,as_of.isoformat())).fetchone()[0]
+        adjustments_minor = sum(int(row["amount_minor"]) for row in adjustments if effective <= row["adjustment_on"] <= as_of.isoformat())
+        balance = int(settings["opening_balance_minor"]) + int(received) - int(cash_expenses) - int(repayments) + adjustments_minor
+    return {"configured": True, "reliable": True, "balance_minor": balance, "opening_balance_minor": int(settings["opening_balance_minor"]), "effective_on": effective, "adjustments": adjustments}
+
+
+def _month_range(start: date, end: date):
+    cursor = date(start.year, start.month, 1)
+    while cursor <= end:
+        yield cursor.strftime("%Y-%m")
+        cursor = date(cursor.year + (cursor.month == 12), 1 if cursor.month == 12 else cursor.month + 1, 1)
+
+
+def payment_calendar(user_id: int, start_value: str, end_value: str, as_of: date | None = None):
+    """Build user-scoped calendar events from the existing authoritative records."""
+    as_of = as_of or date.today()
+    start, end = date.fromisoformat(start_value), date.fromisoformat(end_value)
+    if start.isoformat() != start_value or end.isoformat() != end_value or end < start or (end - start).days > 366:
+        raise ValueError("invalid calendar range")
+    events = []
+    start_text, end_exclusive = start.isoformat(), (end + timedelta(days=1)).isoformat()
+    def add(event_date, amount, description, status, event_type, source_type, source_id, **extra):
+        events.append({"date":event_date,"amount_minor":int(amount),"description":description,"status":status,"event_type":event_type,
+                       "source_type":source_type,"source_id":source_id,**extra})
+
+    # Existing expenses are spending events; only non-card expenses change confirmed cash.
+    with connect() as db:
+        expenses = db.execute("SELECT e.id,e.amount_minor,e.spent_on,e.description,e.card_id,e.payment_method_id,p.name payment_method FROM expenses e LEFT JOIN payment_methods p ON p.id=e.payment_method_id AND p.user_id=e.user_id WHERE e.user_id=? AND e.spent_on>=? AND e.spent_on<? ORDER BY e.spent_on,e.id", (user_id,start_text,end_exclusive)).fetchall()
+        income_rows = db.execute("SELECT id,amount_minor,expected_on,received_on,status,description,income_type FROM income_records WHERE user_id=? AND expected_on<? AND (expected_on>=? OR (received_on>=? AND status='received')) ORDER BY expected_on,id", (user_id,end_exclusive,start_text,start_text)).fetchall()
+        adjustments = db.execute("SELECT id,amount_minor,adjustment_on,description FROM cash_adjustments WHERE user_id=? AND adjustment_on>=? AND adjustment_on<? ORDER BY adjustment_on,id", (user_id,start_text,end_exclusive)).fetchall()
+        repayment_rows = db.execute("SELECT id,card_id,statement_id,amount_minor,paid_on,note FROM card_repayments WHERE user_id=? AND paid_on>=? AND paid_on<? ORDER BY paid_on,id", (user_id,start_text,end_exclusive)).fetchall()
+        rule_rows = db.execute("SELECT r.*,p.name payment_method FROM recurring_expenses r LEFT JOIN payment_methods p ON p.id=r.payment_method_id AND p.user_id=r.user_id WHERE r.user_id=? AND r.status IN ('active','paused')", (user_id,)).fetchall()
+        occurrence_rows = db.execute("SELECT recurring_id,scheduled_on FROM recurring_occurrences WHERE user_id=?", (user_id,)).fetchall()
+    for row in expenses:
+        add(row["spent_on"],row["amount_minor"],row["description"],"completed","expense","expense",row["id"],cash_effect_minor=0 if row["card_id"] else -int(row["amount_minor"]),payment_method=row["payment_method"],card_id=row["card_id"])
+
+    # Materialize any existing recurrence records through the requested window; UNIQUE(rule,date) keeps this idempotent.
+    for month in _month_range(start,end):
+        income_overview(user_id,month,as_of)
+    with connect() as db:
+        income_rows = db.execute("SELECT r.id,r.amount_minor,r.expected_on,r.received_on,r.status,r.rule_id,r.description,r.income_type,q.status rule_status FROM income_records r LEFT JOIN income_rules q ON q.id=r.rule_id AND q.user_id=r.user_id WHERE r.user_id=? AND ((r.status='received' AND r.received_on>=? AND r.received_on<?) OR (r.status!='received' AND r.expected_on>=? AND r.expected_on<?)) ORDER BY COALESCE(r.received_on,r.expected_on),r.id", (user_id,start_text,end_exclusive,start_text,end_exclusive)).fetchall()
+    for row in income_rows:
+        event_date = row["received_on"] if row["status"] == "received" else row["expected_on"]
+        status = row["status"]
+        if row["status"]=="expected" and row["rule_id"] and row["rule_status"]!="active": status=row["rule_status"] or "cancelled"
+        if status == "expected" and event_date < as_of.isoformat(): status = "overdue"
+        add(event_date,row["amount_minor"],row["description"],status,"income","income",row["id"],cash_effect_minor=int(row["amount_minor"]) if status in ("received","expected") else 0,income_type=row["income_type"],expected_on=row["expected_on"],received_on=row["received_on"])
+
+    completed_keys = {(row["recurring_id"],row["scheduled_on"]) for row in occurrence_rows}
+    for rule in rule_rows:
+        start_on = date.fromisoformat(rule["start_on"])
+        end_on = date.fromisoformat(rule["end_on"]) if rule["end_on"] else None
+        index = recurrence_index_on_or_after(start_on,rule["frequency"],start)
+        while True:
+            try: occurrence = recurrence_date(start_on,rule["frequency"],index)
+            except (ValueError,OverflowError): break
+            if occurrence > end or end_on and occurrence > end_on: break
+            key=(rule["id"],occurrence.isoformat())
+            if occurrence >= start and key not in completed_keys:
+                is_card = "kredi kart" in str(rule["payment_method"] or "").casefold()
+                unknown_method=not rule["payment_method"]
+                included=bool(not is_card and not unknown_method and rule["status"]=="active")
+                add(occurrence.isoformat(),rule["amount_minor"],rule["description"],"planned" if rule["status"]=="active" else "paused","recurring_expense","recurring_rule",rule["id"],cash_effect_minor=-int(rule["amount_minor"]) if included else 0,payment_method=rule["payment_method"],forecast_included=included,forecast_issue="payment_method_missing" if unknown_method else "card_not_assigned" if is_card else None,scheduled_on=occurrence.isoformat())
+            index += 1
+
+    with connect() as db:
+        cards = db.execute("SELECT id,display_name,opening_balance_minor FROM credit_cards WHERE user_id=?",(user_id,)).fetchall()
+        installments = db.execute("SELECT o.id,o.user_id,o.ordinal,o.due_on,o.paid_on,o.amount_minor,o.status,o.statement_id,p.card_id,e.description,cc.display_name FROM installment_occurrences o JOIN installment_plans p ON p.id=o.plan_id AND p.user_id=o.user_id JOIN expenses e ON e.id=p.expense_id AND e.user_id=p.user_id JOIN credit_cards cc ON cc.id=p.card_id AND cc.user_id=p.user_id WHERE o.user_id=? AND (o.due_on>=? OR (o.status='paid' AND o.paid_on>=?)) AND (o.due_on<? OR o.paid_on<?) ORDER BY COALESCE(o.paid_on,o.due_on),o.id",(user_id,start_text,start_text,end_exclusive,end_exclusive)).fetchall()
+    installment_ids = {int(row["id"]) for row in installments}
+    for row in repayment_rows:
+        if row["note"] == "Taksit ödemesi":
+            continue
+        add(row["paid_on"],row["amount_minor"],"Kredi kartı ödemesi", "completed","card_repayment","card_repayment",row["id"],cash_effect_minor=-int(row["amount_minor"]),card_id=row["card_id"],statement_id=row["statement_id"])
+    for row in installments:
+        if row["status"] == "cancelled": continue
+        event_date=row["paid_on"] if row["status"]=="paid" else row["due_on"]
+        add(event_date,row["amount_minor"],f"{row['description']} · {row['ordinal']}. taksit",row["status"],"installment","installment_occurrence",row["id"],cash_effect_minor=-int(row["amount_minor"]) if row["status"]=="paid" else 0,card_name=row["display_name"],statement_id=row["statement_id"],forecast_included=False,explanation="Ekstre tutarına dahildir; tahmin ekstre ödeme tarihini kullanır.")
+    for row in adjustments:
+        add(row["adjustment_on"],abs(row["amount_minor"]),row["description"],"completed","cash_adjustment","cash_adjustment",row["id"],cash_effect_minor=int(row["amount_minor"]),signed_amount_minor=int(row["amount_minor"]))
+    for card in cards:
+        statements = list_card_statements(user_id,card["id"]) or []
+        for statement in statements:
+            if not (start_text <= statement["due_on"] < end_exclusive): continue
+            status = "paid" if statement["remaining_minor"] == 0 and statement["total_minor"] else "overdue" if statement["due_on"] < as_of.isoformat() and statement["remaining_minor"] else "partial" if statement["paid_minor"] else "expected"
+            add(statement["due_on"],statement["remaining_minor"],f"{card['display_name']} · Ekstre ödemesi",status,"card_statement","card_statement",statement["id"],cash_effect_minor=-int(statement["remaining_minor"]) if statement["due_on"]>=as_of.isoformat() else 0,card_id=card["id"],closing_on=statement["closing_on"],due_on=statement["due_on"],statement_total_minor=statement["total_minor"],paid_minor=statement["paid_minor"],remaining_minor=statement["remaining_minor"],forecast_included=bool(statement["remaining_minor"] and statement["due_on"]>=as_of.isoformat()))
+    events.sort(key=lambda event:(event["date"],0 if event["event_type"]=="income" else 1,event["event_type"],str(event["source_id"])))
+    return events
+
+
+def cash_flow_forecast(user_id: int, start_value: str | None = None, end_value: str | None = None, as_of: date | None = None):
+    as_of = as_of or date.today()
+    start_value = start_value or as_of.isoformat()
+    if end_value is None:
+        month_index = as_of.year*12+as_of.month-1+2
+        year,month0=divmod(month_index,12)
+        end_value=date(year,month0+1,calendar.monthrange(year,month0+1)[1]).isoformat()
+    requested_start=date.fromisoformat(start_value)
+    if requested_start.isoformat()!=start_value or date.fromisoformat(end_value).isoformat()!=end_value or date.fromisoformat(end_value)<as_of:
+        raise ValueError("forecast end must be today or later")
+    event_start=min(requested_start,as_of)
+    events=payment_calendar(user_id,event_start.isoformat(),end_value,as_of)
+    position=get_cash_position(user_id,as_of)
+    cards=list_credit_cards(user_id)
+    liabilities=sum(int(card["outstanding_minor"]) for card in cards)
+    warnings=[]
+    for event in events:
+        if event["event_type"]=="recurring_expense" and event.get("forecast_issue"):
+            reason="Düzenli harcamanın ödeme yöntemi belirtilmediği için nakit çıkışı tahmine eklenmedi." if event["forecast_issue"]=="payment_method_missing" else "Düzenli kart harcaması belirli bir karta/ekstreye bağlı olmadığından ödeme vadesi tahmin edilemiyor."
+            warnings.append({"level":"insufficient","date":event["date"],"amount_minor":event["amount_minor"],"reason":f"{event['description']}: {reason}"})
+    if not position["reliable"]:
+        warnings.append({"level":"insufficient","date":as_of.isoformat(),"amount_minor":None,"reason":"Güvenilir nakit tahmini için başlangıç nakit bakiyesi ve başlangıç tarihi girilmelidir."})
+    else:
+        balance=int(position["balance_minor"])
+        for event in events:
+            event_date=event["date"]
+            is_future_cash = (event["event_type"]=="income" and event["status"]=="expected" and event_date>=as_of.isoformat()) or (event["event_type"]=="recurring_expense" and event.get("forecast_included") and event_date>=as_of.isoformat()) or (event["event_type"]=="card_statement" and event.get("forecast_included") and event_date>=as_of.isoformat()) or (event["event_type"]=="cash_adjustment" and event_date>as_of.isoformat())
+            if event["event_type"]=="expense" and event_date>as_of.isoformat() and event.get("cash_effect_minor"):
+                is_future_cash=True
+            if not is_future_cash: continue
+            before=balance
+            balance += int(event.get("cash_effect_minor",0))
+            event["projected_balance_minor"]=balance
+            if balance < 0:
+                warnings.append({"level":"high","date":event_date,"amount_minor":abs(balance),"reason":f"{event['description']} sonrasında tahmini nakit eksiye düşüyor; önceki bakiye bu ödemeyi karşılamıyor."})
+            elif event["event_type"]=="card_statement" and int(event["remaining_minor"])>before:
+                warnings.append({"level":"high","date":event_date,"amount_minor":int(event["remaining_minor"]),"reason":"Ekstre ödemesi tahmini kullanılabilir nakit bakiyesini aşabilir."})
+        end_balance=balance
+        if end_balance < 0:
+            warnings.append({"level":"high","date":end_value,"amount_minor":abs(end_balance),"reason":"Dönem sonu tahmini nakit bakiyesi eksi."})
+        incomes=sum(int(e["amount_minor"]) for e in events if e["event_type"]=="income" and e["status"]=="expected" and e["date"]>=as_of.isoformat())
+        obligations=sum(-int(e.get("cash_effect_minor",0)) for e in events if e.get("forecast_included") and e["cash_effect_minor"]<0 and e["date"]>=as_of.isoformat())
+        if obligations>incomes and obligations:
+            warnings.append({"level":"medium","date":end_value,"amount_minor":obligations-incomes,"reason":"Seçili dönemdeki beklenen gelir, planlanan nakit çıkışlarının tamamını karşılamıyor."})
+        if liabilities > max(0,int(position["balance_minor"])):
+            warnings.append({"level":"medium","date":as_of.isoformat(),"amount_minor":liabilities,"reason":"Toplam kredi kartı borcu, doğrulanmış nakit bakiyesinden yüksek."})
+    if any(card["opening_balance_minor"] for card in cards):
+        warnings.append({"level":"insufficient","date":as_of.isoformat(),"amount_minor":sum(int(card["opening_balance_minor"]) for card in cards if card["opening_balance_minor"]),"reason":"Kart açılış borçları için ekstre vadesi tanımlı değil; bu tutarlar ödeme takvimine dağıtılamıyor."})
+    for event in events:
+        if event["event_type"]=="card_statement" and event["status"]=="overdue":
+            warnings.append({"level":"high","date":event["date"],"amount_minor":event["amount_minor"],"reason":f"{event['description']} gecikmiş ve ödenmemiş."})
+    warned_statements={event["source_id"] for event in events if event["event_type"]=="card_statement" and event["status"]=="overdue"}
+    for card in cards:
+        for statement in list_card_statements(user_id,card["id"]) or []:
+            if statement["remaining_minor"] and statement["due_on"]<as_of.isoformat() and statement["id"] not in warned_statements:
+                warnings.append({"level":"high","date":statement["due_on"],"amount_minor":statement["remaining_minor"],"reason":f"{card['display_name']} · Ekstre ödemesi gecikmiş ve ödenmemiş."})
+    included = [event for event in events if event.get("projected_balance_minor") is not None]
+    risk="insufficient" if not position["reliable"] or any(w["level"]=="insufficient" for w in warnings) else "high" if any(w["level"]=="high" for w in warnings) else "medium" if warnings else "low"
+    return {"as_of":as_of.isoformat(),"start_on":as_of.isoformat(),"end_on":end_value,"configured":position["configured"],"starting_cash_minor":position["balance_minor"],"projected_end_minor":end_balance if position["reliable"] else None,"outstanding_card_liability_minor":liabilities,"remaining_installments_minor":sum(int(row["amount_minor"]) for row in list_installments(user_id) if row["status"]=="unpaid"),"events":events,"projection_events":included,"warnings":warnings,"risk":risk}
+
+
+def export_income_csv(user_id: int) -> str:
+    """Export only the caller's income records; recurring rules stay in the app."""
+    with connect() as db:
+        rows=db.execute("SELECT income_type,description,amount_minor,expected_on,received_on,status,note FROM income_records WHERE user_id=? ORDER BY expected_on,id",(user_id,)).fetchall()
+    out=io.StringIO(newline="")
+    writer=csv.writer(out,delimiter=";",lineterminator="\r\n")
+    writer.writerow(["Tür","Açıklama","Tutar","Beklenen tarih","Alınma tarihi","Durum","Not"])
+    def safe(value):
+        value=str(value or "")
+        return "'"+value if value.lstrip().startswith(("=","+","-","@")) else value
+    for row in rows:
+        minor=int(row["amount_minor"])
+        amount=f"{minor//100},{minor%100:02d}"
+        writer.writerow([safe(row["income_type"]),safe(row["description"]),amount,row["expected_on"],row["received_on"] or "",row["status"],safe(row["note"])])
+    return "\ufeff"+out.getvalue()
+
+
+def user_options(user_id: int):
+    with connect() as db:
+        categories = db.execute("SELECT id,name FROM categories WHERE user_id=? AND archived=0 ORDER BY name", (user_id,)).fetchall()
+        methods = db.execute("SELECT id,name FROM payment_methods WHERE user_id=? ORDER BY name", (user_id,)).fetchall()
+    return {"categories":[dict(r) for r in categories],"payment_methods":[dict(r) for r in methods],"credit_cards":list_credit_cards(user_id)}
+
+
+def money_to_minor(value):
+    if isinstance(value, bool): raise ValueError("invalid amount")
+    text = str(value).strip().replace(" ", "")
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."): text = text.replace(".", "").replace(",", ".")
+        else: text = text.replace(",", "")
+    elif "," in text: text = text.replace(",", ".")
+    whole, dot, fraction = text.partition(".")
+    if not whole.isdigit() or (fraction and (not fraction.isdigit() or len(fraction) > 2)):
+        raise ValueError("invalid amount")
+    minor = int(whole)*100 + int((fraction+"00")[:2])
+    if minor > MAX_MINOR:
+        raise ValueError("amount too large")
+    return minor
+
+
+def record_id(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not str(value).isdigit():
+        raise ValueError("invalid record id")
+    result = int(value)
+    if not 1 <= result <= 9_000_000_000_000_000_000:
+        raise ValueError("invalid record id")
+    return result
+
+
+def _month_close(year: int, month: int, day_number: int) -> date:
+    return date(year, month, min(day_number, calendar.monthrange(year, month)[1]))
+
+
+def next_card_closing_date(closing_day: int, as_of: date | None = None) -> date:
+    as_of = as_of or date.today()
+    closing = _month_close(as_of.year, as_of.month, closing_day)
+    if closing < as_of:
+        year, month = as_of.year + (as_of.month == 12), (as_of.month % 12) + 1
+        closing = _month_close(year, month, closing_day)
+    return closing
+
+
+def statement_due_date(closing_day: int, due_day: int, closing_on: date) -> date:
+    """Use the configured day pair to choose the due-date month, clamping short months."""
+    due = _month_close(closing_on.year, closing_on.month, due_day)
+    if due_day <= closing_day or due <= closing_on:
+        due_year, due_month = closing_on.year + (closing_on.month == 12), (closing_on.month % 12) + 1
+        due = _month_close(due_year, due_month, due_day)
+    return due
+
+
+def card_closing_on_or_after(period_start: date, closing_day: int) -> date:
+    closing = _month_close(period_start.year, period_start.month, closing_day)
+    if closing < period_start:
+        year, month = period_start.year + (period_start.month == 12), (period_start.month % 12) + 1
+        closing = _month_close(year, month, closing_day)
+    return closing
+
+
+def _legacy_interval_for_due_day(closing_day: int, due_day: int) -> int:
+    closing = next_card_closing_date(closing_day)
+    due = statement_due_date(closing_day, due_day, closing)
+    return min(90, max(1, (due - closing).days))
+
+
+def _legacy_due_day(closing_day: int, due_days_after_close: int) -> int:
+    closing = next_card_closing_date(closing_day)
+    return (closing + timedelta(days=due_days_after_close)).day
+
+
+def card_cycle(closing_day: int, due_day: int, spent_on: date):
+    """Purchases on the closing date belong to the statement closing that day."""
+    close = _month_close(spent_on.year, spent_on.month, closing_day)
+    if spent_on > close:
+        year, month = spent_on.year + (spent_on.month == 12), (spent_on.month % 12) + 1
+        close = _month_close(year, month, closing_day)
+    previous_month = date(close.year, close.month, 1) - timedelta(days=1)
     previous_close = _month_close(previous_month.year, previous_month.month, closing_day)
     return previous_close + timedelta(days=1), close, statement_due_date(closing_day, due_day, close)
 
