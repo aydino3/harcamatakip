@@ -88,10 +88,16 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     @web.errorhandler(Exception)
     def internal_error(error):
-        # Log only exception type and stack frames: no exception text, request body,
-        # credentials, expense data, or session tokens are copied into app logs.
+        # Keep request data and SQL values out of logs, but include safe PostgreSQL
+        # schema diagnostics so production column mismatches can be repaired.
         stack = "".join(traceback.format_tb(error.__traceback__))
-        web.logger.error("Unhandled request error (%s)\n%s", type(error).__name__, stack)
+        diag = getattr(error, "diag", None)
+        table_name = getattr(diag, "table_name", None)
+        column_name = getattr(diag, "column_name", None)
+        web.logger.error(
+            "Unhandled request error (%s; table=%r; column=%r)\n%s",
+            type(error).__name__, table_name, column_name, stack
+        )
         # Avoid returning exception details (SQL, filesystem paths, request data) to clients.
         return json_error("Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.", 500)
 
