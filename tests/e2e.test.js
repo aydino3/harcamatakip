@@ -139,7 +139,7 @@ test("local signup, expense/category/budget/recurring/CSV flows, account switchi
     await page.locator('#card-form input[name="closing_day"]').fill("15");
     await page.locator('#card-form input[name="due_day"]').fill("20");
     await page.locator("#card-form button.primary").click();
-    await page.getByText(/E2E Banka · E2E Kart/).waitFor({ state: "visible" });
+    await page.locator("#cards b").filter({ hasText: /E2E Banka · E2E Kart/ }).waitFor({ state: "visible" });
     await page.getByRole("link", { name: /Genel Bakış/ }).click();
     await page.getByText("E2E Kart", { exact: true }).waitFor({ state: "visible" });
     assert.equal(await page.locator("#card-form").isVisible(), false);
@@ -405,8 +405,13 @@ test("responsive layout and labeled controls at requested viewport widths", asyn
       for (const section of ["overview", "expenses", "cards", "income"]) {
         await page.locator(`[data-section="${section}"]`).click();
         const layout = await page.evaluate(() => ({ document: document.documentElement.scrollWidth, body: document.body.scrollWidth }));
-        assert.ok(layout.document <= width, `${section} document overflow at ${width}px: ${layout.document}`);
-        assert.ok(layout.body <= width, `${section} body overflow at ${width}px: ${layout.body}`);
+        const overflow = await page.locator("*").evaluateAll(elements => elements
+          .map(element => ({ element, bounds: element.getBoundingClientRect() }))
+          .filter(({ bounds }) => bounds.right > window.innerWidth + 1 || bounds.left < -1)
+          .slice(0, 8)
+          .map(({ element, bounds }) => `${element.tagName.toLowerCase()}#${element.id}.${String(element.className).replace(/\s+/g, ".")}[${Math.round(bounds.left)}..${Math.round(bounds.right)}]`));
+        assert.ok(layout.document <= width, `${section} document overflow at ${width}px: ${layout.document}; ${overflow.join(", ")}`);
+        assert.ok(layout.body <= width, `${section} body overflow at ${width}px: ${layout.body}; ${overflow.join(", ")}`);
         const visibleControl = section === "expenses" ? page.locator("#new-expense") : section === "cards" ? page.locator('#card-form input[name="bank_name"]') : section === "income" ? page.locator('#income-form input[name="description"]') : page.locator(".stat.spend strong");
         const bounds = await visibleControl.boundingBox();
         assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width, `${section} control clipped at ${width}px`);
