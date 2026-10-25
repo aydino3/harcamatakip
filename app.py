@@ -622,6 +622,15 @@ def _apply_pg_schema(db):
                 db._conn.commit()
             except Exception:
                 db._conn.rollback()
+    # Older Supabase databases may already have a sessions table created
+    # before CSRF and expiry columns were introduced. CREATE TABLE IF NOT EXISTS
+    # does not evolve existing tables, so add these columns explicitly.
+    db._conn.cursor().execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS csrf_token TEXT NOT NULL DEFAULT ''"
+    )
+    db._conn.cursor().execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS expires_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'"
+    )
     db._conn.commit()
 
 
