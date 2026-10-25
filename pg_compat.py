@@ -307,18 +307,62 @@ def _split_script(script: str) -> list[str]:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _pg_connect_kwargs(database_url: str) -> dict:
+    """Parse a PostgreSQL URL into psycopg2 keyword arguments.
+
+    Forces IPv4 resolution via socket.AF_INET + psycopg2's ``hostaddr`` so that
+    Vercel serverless functions (which cannot make outbound IPv6 connections) can
+    reach Supabase even when DNS returns an AAAA (IPv6) record first.
+    """
+    import socket
+    from urllib.parse import urlparse, unquote, parse_qs
+
+    parsed = urlparse(database_url)
+    hostname = parsed.hostname or "localhost"
+    port = parsed.port or 5432
+    username = parsed.username or "postgres"
+    password = unquote(parsed.password) if parsed.password else ""
+    dbname = (parsed.path or "/postgres").lstrip("/") or "postgres"
+
+    qs = parse_qs(parsed.query)
+    sslmode = qs.get("sslmode", ["require"])[0]
+
+    kwargs: dict = {
+        "host": hostname,          # kept for SSL certificate hostname validation
+        "port": port,
+        "user": username,
+        "password": password,
+        "dbname": dbname,
+        "sslmode": sslmode,
+        "connect_timeout": 10,
+    }
+
+    # Vercel Lambda cannot make outbound IPv6 connections.
+    # Resolve the hostname exclusively to IPv4 (AF_INET) and pass the result as
+    # `hostaddr` so psycopg2 connects to the IPv4 address while still sending
+    # the SNI hostname for SSL certificate verification.
+    try:
+        infos = socket.getaddrinfo(hostname, port, socket.AF_INET, socket.SOCK_STREAM)
+        if infos:
+            ipv4_addr = infos[0][4][0]
+            kwargs["hostaddr"] = ipv4_addr
+    except socket.gaierror:
+        pass  # no IPv4 record found — let psycopg2 try normally
+
+    return kwargs
+
+
 def connect_pg(database_url: str) -> PgConnection:
     """Open a psycopg2 connection wrapped for sqlite3 compatibility.
 
-    Supabase requires SSL; we append sslmode=require if not already present.
+    Supabase requires SSL and Vercel does not support IPv6 outbound connections.
+    Both constraints are handled here: sslmode=require is injected if absent,
+    and the hostname is resolved to an IPv4 address via ``hostaddr``.
     """
     import psycopg2
-    # Supabase (and most managed PostgreSQL) requires SSL.
-    if "sslmode" not in database_url:
-        sep = "&" if "?" in database_url else "?"
-        database_url = database_url + sep + "sslmode=require"
     try:
-        conn = psycopg2.connect(database_url, connect_timeout=10)
+        kwargs = _pg_connect_kwargs(database_url)
+        conn = psycopg2.connect(**kwargs)
     except Exception as exc:
         raise RuntimeError(f"PostgreSQL bağlantısı kurulamadı: {exc}") from exc
     conn.autocommit = False
