@@ -308,8 +308,18 @@ def _split_script(script: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def connect_pg(database_url: str) -> PgConnection:
-    """Open a psycopg2 connection wrapped for sqlite3 compatibility."""
+    """Open a psycopg2 connection wrapped for sqlite3 compatibility.
+
+    Supabase requires SSL; we append sslmode=require if not already present.
+    """
     import psycopg2
-    conn = psycopg2.connect(database_url)
+    # Supabase (and most managed PostgreSQL) requires SSL.
+    if "sslmode" not in database_url:
+        sep = "&" if "?" in database_url else "?"
+        database_url = database_url + sep + "sslmode=require"
+    try:
+        conn = psycopg2.connect(database_url, connect_timeout=10)
+    except Exception as exc:
+        raise RuntimeError(f"PostgreSQL bağlantısı kurulamadı: {exc}") from exc
     conn.autocommit = False
     return PgConnection(conn)

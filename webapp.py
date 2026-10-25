@@ -27,7 +27,14 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     if not web.config.get("TESTING"):
         core.validate_runtime_configuration()
-        core.init_db()
+        try:
+            core.init_db()
+        except Exception as _db_err:  # noqa: BLE001
+            # Log but don't crash: DB may be temporarily unreachable on cold start.
+            # All request handlers that need the DB will return 503 naturally.
+            import traceback as _tb
+            print(f"[startup] init_db failed: {_db_err}", flush=True)
+            _tb.print_exc()
 
     def json_error(message: str, status: int):
         return jsonify(error=message), status

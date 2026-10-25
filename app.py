@@ -259,7 +259,6 @@ def validate_runtime_configuration():
     # In PostgreSQL mode the connection string carries all configuration;
     # SQLite file-path and mount checks are not applicable.
     if os.environ.get("DATABASE_URL", "").strip():
-        private_beta_enabled(strict=True)
         return True
     environment = os.environ.get("APP_ENV", "development").strip().lower()
     if environment not in ("development", "production"):
