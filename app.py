@@ -626,6 +626,12 @@ def _apply_pg_schema(db):
     # before CSRF and expiry columns were introduced. CREATE TABLE IF NOT EXISTS
     # does not evolve existing tables, so add these columns explicitly.
     db._conn.cursor().execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS token_hash TEXT"
+    )
+    db._conn.cursor().execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id BIGINT"
+    )
+    db._conn.cursor().execute(
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS csrf_token TEXT NOT NULL DEFAULT ''"
     )
     db._conn.cursor().execute(
