@@ -1051,8 +1051,27 @@ def reserve_auth_attempt(address: str, scope: str, identity: str = "") -> bool:
         if configured_database_url():
             # Older deployments may have an incompatible auth_failures relation.
             rate_limit_table = "auth_rate_limit_events"
-        db.execute(f"DELETE FROM {rate_limit_table} WHERE occurred_at<datetime('now','-1 day')")
-        count = db.execute(f"SELECT COUNT(*) FROM {rate_limit_table} WHERE source_hash=? AND scope=? AND occurred_at>=datetime('now','-15 minutes')", (source_hash, scope)).fetchone()[0]
+        if configured_database_url():
+            # Use Python-generated bounds so this works with PostgreSQL timestamps
+            # and SQLite's text timestamps without relying on SQLite datetime().
+            now = datetime.utcnow()
+            day_cutoff = (now - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+            window_cutoff = (now - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            day_cutoff = "now", "-1 day"
+            window_cutoff = "now", "-15 minutes"
+        if configured_database_url():
+            db.execute(f"DELETE FROM {rate_limit_table} WHERE occurred_at<?", (day_cutoff,))
+            count = db.execute(
+                f"SELECT COUNT(*) FROM {rate_limit_table} WHERE source_hash=? AND scope=? AND occurred_at>=?",
+                (source_hash, scope, window_cutoff),
+            ).fetchone()[0]
+        else:
+            db.execute(f"DELETE FROM {rate_limit_table} WHERE occurred_at<datetime(?,?)", day_cutoff)
+            count = db.execute(
+                f"SELECT COUNT(*) FROM {rate_limit_table} WHERE source_hash=? AND scope=? AND occurred_at>=datetime(?,?)",
+                (source_hash, scope, *window_cutoff),
+            ).fetchone()[0]
         if count >= limit:
             return True
         db.execute(f"INSERT INTO {rate_limit_table}(source_hash,scope) VALUES(?,?)", (source_hash, scope))
