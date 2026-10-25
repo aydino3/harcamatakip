@@ -1052,6 +1052,17 @@ def reserve_auth_attempt(address: str, scope: str, identity: str = "") -> bool:
     source_hash = _auth_source_hash(address, scope, identity)
     with LOCK, connect() as db:
         db.execute("BEGIN IMMEDIATE")
+        if configured_database_url():
+            # Self-heal old Supabase tables on the request path too. Some deployed
+            # databases predate these columns and CREATE TABLE IF NOT EXISTS alone
+            # never upgrades them.
+            db._conn.cursor().execute(
+                "CREATE TABLE IF NOT EXISTS auth_failures "
+                "(source_hash TEXT, scope TEXT, occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            )
+            db._conn.cursor().execute("ALTER TABLE auth_failures ADD COLUMN IF NOT EXISTS source_hash TEXT")
+            db._conn.cursor().execute("ALTER TABLE auth_failures ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'login'")
+            db._conn.cursor().execute("ALTER TABLE auth_failures ADD COLUMN IF NOT EXISTS occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP")
         db.execute("DELETE FROM auth_failures WHERE occurred_at<datetime('now','-1 day')")
         count = db.execute("SELECT COUNT(*) FROM auth_failures WHERE source_hash=? AND scope=? AND occurred_at>=datetime('now','-15 minutes')", (source_hash, scope)).fetchone()[0]
         if count >= limit:
