@@ -1021,7 +1021,7 @@ def create_session(user_id: int):
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with connect() as db:
         expires_at = (datetime.utcnow() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-        db.execute("INSERT INTO auth_sessions_v2(token_hash,user_id,csrf_token,expires_at) VALUES(?,?,?,?)",
+        db.execute("INSERT INTO auth_sessions_v2(token_hash,user_id,csrf_token,expires_at) VALUES(?,?,?,?) RETURNING token_hash",
                    (token_hash, user_id, csrf, expires_at))
     return token, csrf
 
