@@ -11,5 +11,8 @@
       "src": "/(.*)",
       "dest": "/api/index.py"
     }
+  ],
+  "regions": [
+    "fra1"
   ]
 }
