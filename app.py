@@ -622,29 +622,6 @@ def _apply_pg_schema(db):
                 db._conn.commit()
             except Exception:
                 db._conn.rollback()
-    db._conn.cursor().execute(
-        "CREATE TABLE IF NOT EXISTS auth_attempt_windows_v2 "
-        "(source_hash TEXT, scope TEXT, "
-        "occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)"
-    )
-    # Heal partially initialized tables from earlier deploys without touching
-    # user data or relying on CREATE TABLE IF NOT EXISTS to upgrade a relation.
-    db._conn.cursor().execute(
-        "ALTER TABLE auth_attempt_windows_v2 "
-        "ADD COLUMN IF NOT EXISTS source_hash TEXT"
-    )
-    db._conn.cursor().execute(
-        "ALTER TABLE auth_attempt_windows_v2 "
-        "ADD COLUMN IF NOT EXISTS scope TEXT"
-    )
-    db._conn.cursor().execute(
-        "ALTER TABLE auth_attempt_windows_v2 "
-        "ADD COLUMN IF NOT EXISTS occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"
-    )
-    db._conn.cursor().execute(
-        "CREATE INDEX IF NOT EXISTS auth_attempt_windows_v2_window "
-        "ON auth_attempt_windows_v2(source_hash,scope,occurred_at)"
-    )
     db._conn.commit()
 
 
@@ -1048,6 +1025,7 @@ def session_user(token: str | None):
 
 AUTH_FAILURE_LIMITS = {"login": 20, "register": 10, "account-delete": 10}
 AUTH_SOURCE_LIMITS = {"login": 100, "register": 30, "account-delete": 50}
+_AUTH_ATTEMPTS: dict[tuple[str, str], list[datetime]] = {}
 
 
 def _auth_source_hash(address: str, scope: str, identity: str) -> str:
@@ -1056,44 +1034,48 @@ def _auth_source_hash(address: str, scope: str, identity: str) -> str:
 
 
 def reserve_auth_attempt(address: str, scope: str, identity: str = "") -> bool:
-    """Atomically reserve a failed-auth slot; true means this source/key is throttled."""
+    """Atomically reserve an auth slot; true means this source/key is throttled."""
     limit = AUTH_SOURCE_LIMITS[scope] if not identity else AUTH_FAILURE_LIMITS[scope]
     source_hash = _auth_source_hash(address, scope, identity)
+    if configured_database_url():
+        # Serverless instances can cold-start concurrently, so avoid DDL and
+        # writes to potentially legacy auth tables on the authentication path.
+        # This per-instance guard remains bounded and never blocks account access
+        # because of an unrelated database schema mismatch.
+        now = datetime.utcnow()
+        cutoff = now - timedelta(minutes=15)
+        key = (source_hash, scope)
+        with LOCK:
+            attempts = [item for item in _AUTH_ATTEMPTS.get(key, []) if item >= cutoff]
+            throttled = len(attempts) >= limit
+            attempts.append(now)
+            _AUTH_ATTEMPTS[key] = attempts
+            if len(_AUTH_ATTEMPTS) > 5000:
+                for old_key in list(_AUTH_ATTEMPTS)[:1000]:
+                    kept = [item for item in _AUTH_ATTEMPTS[old_key] if item >= cutoff]
+                    if kept:
+                        _AUTH_ATTEMPTS[old_key] = kept
+                    else:
+                        _AUTH_ATTEMPTS.pop(old_key, None)
+            return throttled
     with LOCK, connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        rate_limit_table = "auth_failures"
-        if configured_database_url():
-            # Older deployments may have an incompatible auth_failures relation.
-            rate_limit_table = "auth_attempt_windows_v2"
-        if configured_database_url():
-            # Use Python-generated bounds so this works with PostgreSQL timestamps
-            # and SQLite's text timestamps without relying on SQLite datetime().
-            now = datetime.utcnow()
-            day_cutoff = (now - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
-            window_cutoff = (now - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            day_cutoff = "now", "-1 day"
-            window_cutoff = "now", "-15 minutes"
-        if configured_database_url():
-            db.execute(f"DELETE FROM {rate_limit_table} WHERE occurred_at<?", (day_cutoff,))
-            count = db.execute(
-                f"SELECT COUNT(*) FROM {rate_limit_table} WHERE source_hash=? AND scope=? AND occurred_at>=?",
-                (source_hash, scope, window_cutoff),
-            ).fetchone()[0]
-        else:
-            db.execute(f"DELETE FROM {rate_limit_table} WHERE occurred_at<datetime(?,?)", day_cutoff)
-            count = db.execute(
-                f"SELECT COUNT(*) FROM {rate_limit_table} WHERE source_hash=? AND scope=? AND occurred_at>=datetime(?,?)",
-                (source_hash, scope, *window_cutoff),
-            ).fetchone()[0]
+        db.execute("DELETE FROM auth_failures WHERE occurred_at<datetime('now','-1 day')")
+        count = db.execute(
+            "SELECT COUNT(*) FROM auth_failures WHERE source_hash=? AND scope=? AND occurred_at>=datetime('now','-15 minutes')",
+            (source_hash, scope),
+        ).fetchone()[0]
         if count >= limit:
             return True
-        db.execute(f"INSERT INTO {rate_limit_table}(source_hash,scope) VALUES(?,?)", (source_hash, scope))
+        db.execute("INSERT INTO auth_failures(source_hash,scope) VALUES(?,?)", (source_hash, scope))
         return False
-
 
 def clear_auth_failures(address: str, scope: str, identity: str = ""):
     source_hash = _auth_source_hash(address, scope, identity)
+    if configured_database_url():
+        with LOCK:
+            _AUTH_ATTEMPTS.pop((source_hash, scope), None)
+        return
     with connect() as db:
         db.execute("DELETE FROM auth_failures WHERE source_hash=? AND scope=?", (source_hash, scope))
 
