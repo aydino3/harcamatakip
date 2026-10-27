@@ -226,6 +226,96 @@ class SimpleCashflowTest(unittest.TestCase):
         self.assertEqual(client.post('/api/simple-income',json=payload,headers=headers).status_code,200)
         self.assertEqual(client.post('/api/simple-income',json={**base,'frequency':'yearly'},headers=headers).status_code,400)
 
+    def remove(self,kind,record_id):
+        data=finance.read_data(self.user)
+        return finance.delete_financial_record(self.user,{'record_kind':kind,'id':record_id,'revision':finance.managed_revision(data,kind,record_id),'confirmation':'SİL'})
+
+    def test_income_edit_delete_restore_reconciles_actual_cash_and_keeps_source(self):
+        finance.save_opening(self.user,{'amount':'1000','effective_on':'2024-01-01'})
+        record=finance.save_income_once(self.user,{'description':'Ek gelir','amount':'100','expected_on':'2024-01-02','request_key':'crud-income-0001'})['id']
+        row=finance.overview(self.user,'2024-01-01','2024-01-31')['income_records'][0]
+        finance.edit_simple_income(self.user,{'record_kind':'income_record','id':record,'revision':row['revision'],'description':'Düzeltilmiş gelir','amount':'125.25','expected_on':'2024-01-02','status':'received','received_on':'2024-01-03'})
+        self.assertEqual(finance.overview(self.user,'2024-01-01','2024-01-31')['cash_position']['balance_minor'],'112525')
+        with self.assertRaises(finance.Conflict):finance.edit_simple_income(self.user,{'record_kind':'income_record','id':record,'revision':row['revision'],'description':'Eski ekran','amount':'1','expected_on':'2024-01-02'})
+        removed=self.remove('income_record',record)
+        self.assertEqual(finance.overview(self.user,'2024-01-01','2024-01-31')['cash_position']['balance_minor'],'100000')
+        with core.connect() as db:self.assertEqual(db.execute('SELECT amount_minor FROM income_records WHERE id=?',(record,)).fetchone()[0],12525)
+        with self.assertRaises(finance.Conflict):finance.restore_financial_record(self.other,removed)
+        finance.restore_financial_record(self.user,removed)
+        self.assertEqual(finance.overview(self.user,'2024-01-01','2024-01-31')['cash_position']['balance_minor'],'112525')
+        self.remove('income_record',record)
+        with self.assertRaises(finance.Conflict):finance.restore_financial_record(self.user,removed)
+
+    def test_deleted_regular_income_receipt_does_not_regenerate_virtual_income(self):
+        rule=finance.save_monthly_income(self.user,{'description':'Maaş','amount':'100','expected_on':'2024-01-31','frequency':'monthly','request_key':'crud-rule-000001'})['id']
+        receipt=finance.receive_income(self.user,{'rule_id':rule,'scheduled_on':'2024-01-31','received_on':'2024-01-31'})['id']
+        removed=self.remove('income_record',receipt)
+        january=finance.overview(self.user,'2024-01-01','2024-01-31')
+        self.assertEqual(january['net_minor'],'0');self.assertEqual(january['events'],[])
+        self.assertEqual(finance.overview(self.user,'2024-02-01','2024-02-29')['net_minor'],'10000')
+        with self.assertRaises(ValueError):finance.receive_income(self.user,{'rule_id':rule,'scheduled_on':'2024-01-31','received_on':'2024-01-31'})
+        finance.restore_financial_record(self.user,removed)
+        whole=self.remove('income_rule',rule)
+        self.assertEqual(finance.overview(self.user,'2024-01-01','2024-03-31')['net_minor'],'0')
+        finance.restore_financial_record(self.user,whole)
+        self.assertEqual(finance.overview(self.user,'2024-01-01','2024-03-31')['net_minor'],'30000')
+
+    def test_income_rule_edit_preserves_receipts_and_changes_future_amount(self):
+        from unittest.mock import patch
+        rule=finance.save_monthly_income(self.user,{'description':'Maaş','amount':'100','expected_on':'2024-01-01','frequency':'monthly','request_key':'crud-rule-edit-001'})['id']
+        finance.receive_income(self.user,{'rule_id':rule,'scheduled_on':'2024-01-01','received_on':'2024-01-01'})
+        with core.connect() as db:db.execute("INSERT INTO income_records(user_id,rule_id,income_type,description,amount_minor,expected_on,status) VALUES(?,?,'additional','Maaş',10000,'2024-02-01','expected')",(self.user,rule))
+        row=finance.overview(self.user,'2024-01-01','2024-03-31')['income_rules'][0]
+        payload={'record_kind':'income_rule','id':rule,'revision':row['revision'],'description':'Güncel maaş','amount':'200','expected_on':'2024-01-01','frequency':'monthly','schedule_mode':'anchored'}
+        with patch.object(finance,'today',return_value=date(2024,1,15)):finance.edit_simple_income(self.user,payload)
+        self.assertEqual(finance.overview(self.user,'2024-01-01','2024-01-31')['net_minor'],'10000')
+        self.assertEqual(finance.overview(self.user,'2024-02-01','2024-02-29')['net_minor'],'20000')
+        payload['revision']=finance.overview(self.user,'2024-01-01','2024-03-31')['income_rules'][0]['revision']
+        with self.assertRaises(ValueError):finance.edit_simple_income(self.user,{**payload,'frequency':'weekly'})
+        with self.assertRaises(ValueError):finance.edit_simple_income(self.other,payload)
+
+    def test_regular_income_without_receipts_can_edit_date_frequency_and_last_day(self):
+        rule=finance.save_monthly_income(self.user,{'description':'Plan','amount':'100','start_month':'2024-01','schedule_mode':'last_day','frequency':'monthly','request_key':'crud-flex-rule-01'})['id']
+        with core.connect() as db:db.execute("INSERT INTO income_records(user_id,rule_id,income_type,description,amount_minor,expected_on,status) VALUES(?,?,'additional','Plan',10000,'2024-01-31','expected')",(self.user,rule))
+        row=finance.overview(self.user,'2024-01-01','2024-03-31')['income_rules'][0]
+        finance.edit_simple_income(self.user,{'record_kind':'income_rule','id':rule,'revision':row['revision'],'description':'Haftalık plan','amount':'75','frequency':'weekly','schedule_mode':'anchored','expected_on':'2024-01-02'})
+        view=finance.overview(self.user,'2024-01-01','2024-01-23')
+        self.assertEqual([event['date'] for event in view['events']],['2024-01-02','2024-01-09','2024-01-16','2024-01-23'])
+        self.assertEqual(view['net_minor'],'30000')
+        self.assertEqual(finance.overview(self.user,'2024-01-01','2024-01-31')['net_minor'],'37500')
+        with self.assertRaisesRegex(ValueError,'Bitiş yılını'):
+            self.plan(start_on='2026-11-06',end_on='2026-02-04',request_key='crud-wrong-year-01')
+
+    def test_payment_delete_restore_removes_only_owned_plan_cash_effects(self):
+        finance.save_opening(self.user,{'amount':'1000','effective_on':'2024-01-01'})
+        card=self.card(payment_due_on='2024-01-09')
+        plan=self.plan(entry_kind='installment',card_ref=card)
+        finance.record_payment(self.user,plan,{'scheduled_on':'2024-01-09','paid_on':'2024-01-09','amount':'40','request_key':'crud-partial-plan-01'})
+        finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2024-01','amount':'300','version':0})
+        finance.record_card_monthly_payment(self.user,{'card_ref':card,'month':'2024-01','amount':'30','paid_on':'2024-01-09','request_key':'crud-invoice-paid-01'})
+        before=finance.overview(self.user,'2024-01-01','2024-01-31')
+        self.assertEqual(before['cash_position']['balance_minor'],'93000')
+        removed=self.remove('payment_plan',plan)
+        after=finance.overview(self.user,'2024-01-01','2024-01-31')
+        self.assertEqual(after['cash_position']['balance_minor'],'97000')
+        self.assertEqual(after['net_minor'],'-30000')
+        self.assertEqual(after['card_monthly_debt']['cards'][0]['extra_minor'],'30000')
+        with self.assertRaises(ValueError):finance.record_payment(self.user,plan,{'scheduled_on':'2024-01-09','paid_on':'2024-01-09','amount':'1','request_key':'crud-deleted-paid-01'})
+        finance.restore_financial_record(self.user,removed)
+        self.assertEqual(finance.overview(self.user,'2024-01-01','2024-01-31')['cash_position']['balance_minor'],'93000')
+
+    def test_crud_http_csrf_ownership_and_delete_confirmation(self):
+        client=webapp.create_app({'TESTING':True,'PRIVATE_BETA':False}).test_client()
+        login=client.post('/api/login',json={'email':'cashflow-fixture@example.invalid','password':'synthetic-only-password'});headers={'X-CSRF-Token':login.json['csrf']}
+        record=finance.save_income_once(self.user,{'description':'API gelir','amount':'10','expected_on':'2024-01-02','request_key':'crud-http-income-01'})['id']
+        data=finance.read_data(self.user);payload={'record_kind':'income_record','id':record,'revision':finance.managed_revision(data,'income_record',record),'confirmation':'SİL'}
+        self.assertEqual(client.post('/api/simple-records/delete',json=payload).status_code,403)
+        self.assertEqual(client.post('/api/simple-records/delete',json={**payload,'confirmation':''},headers=headers).status_code,400)
+        self.assertEqual(client.post('/api/simple-records/delete',json={**payload,'id':99999999},headers=headers).status_code,400)
+        removed=client.post('/api/simple-records/delete',json=payload,headers=headers)
+        self.assertEqual(removed.status_code,200)
+        self.assertEqual(client.post('/api/simple-records/restore',json=removed.json,headers=headers).status_code,200)
+
     def statement_purchase(self,amount='120',spent='2024-01-05',installments=1):
         card=core.save_credit_card(self.user,{'bank_name':'Sentetik','display_name':'Ekstre kartı','closing_day':22,'due_day':3})
         expense=core.save_expense(self.user,{'amount':amount,'spent_on':spent,'description':'Ekstre alışverişi','card_id':card,'installments_count':installments,'first_installment_on':spent})

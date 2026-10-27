@@ -73,7 +73,7 @@ def read_data(user_id,connection=None):
             rule.update(entry_kind=extra.get('entry_kind',fallback),purchased_on=extra.get('purchased_on'),card_ref=('legacy:'+str(extra['legacy_card_id'])) if extra.get('legacy_card_id') else ('card:'+str(extra['profile_card_id'])) if extra.get('profile_card_id') else '')
         opening=db.execute("SELECT opening_balance_minor,effective_on FROM cash_settings WHERE user_id=?",(user_id,)).fetchone()
         data["opening"]=dict(opening) if opening else None
-    return data
+    return _visible_records(data,user_id,connection)
 
 
 def calculate(data,start_value,end_value,as_of=None):
@@ -85,14 +85,16 @@ def calculate(data,start_value,end_value,as_of=None):
     def add(key,when,amount,description,kind,status,**extra):
         if start_value<=when<=end_value:
             events.append({"id":key,"date":when,"amount_minor":int(amount),"description":description,"kind":kind,"status":status,**extra})
-    actual_income_keys=set()
+    actual_income_keys=set(tuple(key) for key in data.get('suppressed_income_keys',[]))
     rules={row["id"]:row for row in data["income_rules"]}
     for row in data["income_records"]:
+        if row["rule_id"] is not None:
+            actual_income_keys.add((row["rule_id"],row["expected_on"]))
         if row["status"]=="received":
             if row["rule_id"] is not None:
                 actual_income_keys.add((row["rule_id"],row["expected_on"]))
             add(f"income:{row['id']}",row["received_on"],row["amount_minor"],row["description"],"income","received",record_id=row["id"],expected_on=row["expected_on"])
-        elif row["rule_id"] is None and row["status"]=="expected":
+        elif row["status"]=="expected":
             add(f"income:{row['id']}",row["expected_on"],row["amount_minor"],row["description"],"income","overdue" if row["expected_on"]<as_of.isoformat() else "expected",record_id=row["id"])
     for rule in rules.values():
         if rule["status"]!="active":
@@ -170,9 +172,9 @@ def calculate(data,start_value,end_value,as_of=None):
 def overview(user_id,start_value,end_value):
     data=read_data(user_id)
     result=calculate(data,start_value,end_value)
-    result["rules"]=[{**rule,"revision":rule_revision(rule),"scheduled_total_minor":str(sum(int(rule["amount_minor"]) for _ in payment_dates(rule,date.fromisoformat(start_value),date.fromisoformat(end_value))) if rule["status"]=="active" else 0)} for rule in data["recurring"]]
-    result["income_rules"]=data["income_rules"]
-    result["income_records"]=data["income_records"]
+    result["rules"]=[{**rule,"revision":rule_revision(rule),"deletion_revision":managed_revision(data,"payment_plan",rule["id"]),"has_paid":any(row["recurring_id"]==rule["id"] for row in data["payment_events"]+data["occurrences"]),"scheduled_total_minor":str(sum(int(rule["amount_minor"]) for _ in payment_dates(rule,date.fromisoformat(start_value),date.fromisoformat(end_value))) if rule["status"]=="active" else 0)} for rule in data["recurring"]]
+    result["income_rules"]=[{**row,"revision":managed_revision(data,"income_rule",row["id"]),"amount_minor":str(income_rule_price(data,row)),"has_receipts":any(item["rule_id"]==row["id"] and item["status"]=="received" for item in data["income_records"])} for row in data["income_rules"]]
+    result["income_records"]=[{**row,"revision":managed_revision(data,"income_record",row["id"])} for row in data["income_records"]]
     result["income_rule_amounts"]=data["income_rule_amounts"]
     result['cash_position']=cash_position(data)
     projection=projected_balance(data,end_value)
@@ -199,6 +201,16 @@ def initialize():
         pg=hasattr(db,"_conn")
         identity="BIGSERIAL" if pg else "INTEGER"
         integer="BIGINT" if pg else "INTEGER"
+        db.execute(f"""CREATE TABLE IF NOT EXISTS financial_record_deletions (
+            user_id {integer} NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            record_kind TEXT NOT NULL CHECK(record_kind IN ('income_record','income_rule','payment_plan')),
+            record_id {integer} NOT NULL,token TEXT NOT NULL,deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(user_id,record_kind,record_id))""")
+        if pg:
+            db.execute('ALTER TABLE financial_record_deletions ENABLE ROW LEVEL SECURITY')
+            for role in ('PUBLIC','anon','authenticated'):
+                if role=='PUBLIC' or db.execute('SELECT 1 FROM pg_roles WHERE rolname=?',(role,)).fetchone():
+                    db.execute(f'REVOKE ALL ON financial_record_deletions FROM {role}')
         db.execute(f"""CREATE TABLE IF NOT EXISTS payment_events (
             id {identity} PRIMARY KEY,user_id {integer} NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             recurring_id {integer} NOT NULL,scheduled_on TEXT NOT NULL,paid_on TEXT NOT NULL,
@@ -274,6 +286,7 @@ def record_payment(user_id,rule_id,payload):
         raise ValueError("Ödeme tutarı sıfırdan büyük olmalı.")
     with core.LOCK,core.connect() as db:
         _write_lock(db,'recurring_expenses',user_id,rule_id)
+        _assert_visible(db,user_id,'payment_plan',rule_id)
         prior=db.execute("SELECT * FROM payment_events WHERE user_id=? AND idempotency_key=?",(user_id,key)).fetchone()
         if prior:
             if (prior["recurring_id"],prior["scheduled_on"],prior["paid_on"],prior["amount_minor"])!=(rule_id,scheduled.isoformat(),paid.isoformat(),amount):
@@ -333,6 +346,7 @@ def save_payment_plan(user_id,payload):
         _write_lock(db,'recurring_expenses',user_id,record_id)
         old=db.execute('SELECT * FROM recurring_expenses WHERE id=? AND user_id=?',(record_id,user_id)).fetchone() if record_id else None
         if record_id and (not old or old['status']=='cancelled'):raise ValueError('Ödeme planı bulunamadı.')
+        if record_id:_assert_visible(db,user_id,'payment_plan',record_id)
         old_detail=db.execute('SELECT * FROM payment_plan_details WHERE recurring_id=? AND user_id=?',(record_id,user_id)).fetchone() if old else None
         methods=[dict(row) for row in db.execute('SELECT id,name FROM payment_methods WHERE user_id=?',(user_id,))]
         old_meta=_detail_fields(old_detail,legacy_entry_kind(dict(old),methods) if old else 'installment')
@@ -359,7 +373,8 @@ def save_payment_plan(user_id,payload):
             if payload.get('entry_kind') in ('installment','regular') and not last:raise ValueError('Ödemenin bitiş tarihini girin.')
             frequency=payload.get('frequency','monthly')
             if kind=='regular' and frequency not in ('monthly','weekly'):raise ValueError('Banka / nakit ödemesi aylık veya haftalık olabilir.')
-        if first.isoformat()!=(payload.get('start_on') or first.isoformat()) or last and last<first:raise ValueError('İlk ve son ödeme tarihlerini kontrol edin.')
+        if first.isoformat()!=(payload.get('start_on') or first.isoformat()):raise ValueError('İlk ödeme tarihini kontrol edin.')
+        if last and last<first:raise ValueError(f'Son ödeme tarihi ({last:%d.%m.%Y}), ilk ödeme tarihinden ({first:%d.%m.%Y}) önce olamaz. Bitiş yılını kontrol edin.')
         if frequency not in ('monthly','weekly','yearly'):raise ValueError('Ödeme sıklığını kontrol edin.')
         category=core.record_id(payload.get('category_id',old['category_id'] if old else None))
         method=core.record_id(payload.get('payment_method_id',old['payment_method_id'] if old else None))
@@ -422,15 +437,18 @@ def receive_income(user_id,payload):
     with core.LOCK,core.connect() as db:
         _write_lock(db,"income_records",user_id)
         if record_id:
+            _assert_visible(db,user_id,'income_record',record_id)
             row=db.execute("SELECT * FROM income_records WHERE id=? AND user_id=?",(record_id,user_id)).fetchone()
             if not row or row["status"]=="cancelled":
                 raise ValueError("Gelir kaydı bulunamadı.")
+            if row["rule_id"] is not None:_assert_visible(db,user_id,"income_rule",row["rule_id"])
             amount=row["amount_minor"]
         else:
             scheduled=date.fromisoformat(payload.get("scheduled_on",""))
             rule=db.execute("SELECT * FROM income_rules WHERE id=? AND user_id=?",(rule_id,user_id)).fetchone()
-            if not rule:
-                raise ValueError("Gelir kuralı bulunamadı.")
+            if not rule or rule["status"]!="active":
+                raise ValueError("Aktif gelir kuralı bulunamadı.")
+            _assert_visible(db,user_id,'income_rule',rule_id)
             first=date.fromisoformat(rule["start_on"])
             index=core.income_recurrence_index(first,rule["frequency"],scheduled,rule["schedule_mode"])
             if scheduled<first or core.income_recurrence_date(first,rule["frequency"],index,rule["schedule_mode"])!=scheduled or rule["end_on"] and scheduled.isoformat()>rule["end_on"]:
@@ -441,6 +459,8 @@ def receive_income(user_id,payload):
             amount=price[0]
             row=db.execute("SELECT * FROM income_records WHERE rule_id=? AND user_id=? AND expected_on=?",(rule_id,user_id,scheduled.isoformat())).fetchone()
             if row:
+                _assert_visible(db,user_id,'income_record',row['id'])
+                if row['status']=='cancelled':raise ValueError('Gelir kaydı silinmiş veya iptal edilmiş.')
                 record_id=row["id"]
             else:
                 if str(payload.get("expected_amount_minor",amount))!=str(amount):
@@ -750,3 +770,119 @@ def record_card_monthly_payment(user_id,payload):
         if not balance or amount>balance['remaining_minor']:raise ValueError('Ödeme, aylık kart borcunun kalanını aşamaz.')
         result=db.execute('INSERT INTO card_monthly_payments(user_id,card_ref,month,amount_minor,paid_on,idempotency_key) VALUES(?,?,?,?,?,?)',(user_id,ref,month,amount,paid.isoformat(),key))
         return {'id':result.lastrowid,'created':True}
+
+
+def _assert_visible(db,user_id,kind,record_id):
+    if db.execute('SELECT 1 FROM financial_record_deletions WHERE user_id=? AND record_kind=? AND record_id=?',(user_id,kind,record_id)).fetchone():
+        raise ValueError('Bu kayıt silinmiş. Güncel listeyi yenileyin veya silme işlemini geri alın.')
+
+
+def _visible_records(data,user_id,connection=None):
+    with (nullcontext(connection) if connection is not None else core.connect()) as db:
+        deleted=[dict(row) for row in db.execute('SELECT record_kind,record_id FROM financial_record_deletions WHERE user_id=?',(user_id,))]
+    ids=lambda kind:{row['record_id'] for row in deleted if row['record_kind']==kind}
+    income_rules,records,plans=ids('income_rule'),ids('income_record'),ids('payment_plan')
+    data['suppressed_income_keys']=[(row['rule_id'],row['expected_on']) for row in data['income_records'] if row['rule_id'] is not None and row['id'] in records]
+    data['income_rules']=[row for row in data['income_rules'] if row['id'] not in income_rules]
+    data['income_rule_amounts']=[row for row in data['income_rule_amounts'] if row['rule_id'] not in income_rules]
+    data['income_records']=[row for row in data['income_records'] if row['id'] not in records and row['rule_id'] not in income_rules]
+    linked={row['expense_id'] for row in data['occurrences'] if row['recurring_id'] in plans and row.get('expense_id') is not None}
+    data['recurring']=[row for row in data['recurring'] if row['id'] not in plans]
+    data['payment_events']=[row for row in data['payment_events'] if row['recurring_id'] not in plans]
+    data['occurrences']=[row for row in data['occurrences'] if row['recurring_id'] not in plans]
+    data['expenses']=[row for row in data['expenses'] if row['id'] not in linked]
+    removed_plans={row['id'] for row in data['installment_plans'] if row['expense_id'] in linked}
+    data['installment_plans']=[row for row in data['installment_plans'] if row['id'] not in removed_plans]
+    data['installment_occurrences']=[row for row in data['installment_occurrences'] if row['plan_id'] not in removed_plans]
+    return data
+
+
+def managed_source(data,kind,record_id):
+    if kind=='income_record':
+        row=next((row for row in data['income_records'] if row['id']==record_id),None);children=[]
+    elif kind=='income_rule':
+        row=next((row for row in data['income_rules'] if row['id']==record_id),None)
+        children=[item for key in ('income_records','income_rule_amounts') for item in data[key] if item['rule_id']==record_id]
+    elif kind=='payment_plan':
+        row=next((row for row in data['recurring'] if row['id']==record_id),None)
+        children=[item for key in ('payment_events','occurrences') for item in data[key] if item['recurring_id']==record_id]
+    else:raise ValueError('Kayıt türünü kontrol edin.')
+    if not row:raise ValueError('Kayıt hesabınıza ait değil veya bulunamadı.')
+    return row,children
+
+
+def managed_revision(data,kind,record_id):
+    import hashlib,json
+    return hashlib.sha256(json.dumps(managed_source(data,kind,record_id),sort_keys=True,default=str).encode()).hexdigest()
+
+
+def income_rule_price(data,rule):
+    prices=[row for row in data['income_rule_amounts'] if row['rule_id']==rule['id']]
+    eligible=[row for row in prices if row['effective_on']<=today().isoformat()]
+    return int(max(eligible,key=lambda row:row['effective_on'])['amount_minor']) if eligible else int(min(prices,key=lambda row:row['effective_on'])['amount_minor']) if prices else 0
+
+
+def delete_financial_record(user_id,payload):
+    import secrets
+    if payload.get('confirmation')!='SİL':raise ValueError('Silme işlemini onaylayın.')
+    kind=payload.get('record_kind');record_id=core.record_id(payload.get('id'))
+    with core.LOCK,core.connect() as db:
+        _write_lock(db,'users',user_id,user_id)
+        old=db.execute('SELECT token FROM financial_record_deletions WHERE user_id=? AND record_kind=? AND record_id=?',(user_id,kind,record_id)).fetchone()
+        if old:return {'deleted':True,'record_kind':kind,'id':record_id,'token':old['token']}
+        data=read_data(user_id,db)
+        if payload.get('revision')!=managed_revision(data,kind,record_id):raise Conflict('Kayıt değişmiş. Güncel bilgileri görüp silme işlemini yeniden onaylayın.')
+        token=secrets.token_urlsafe(24)
+        db.execute('INSERT INTO financial_record_deletions(user_id,record_kind,record_id,token) VALUES(?,?,?,?)',(user_id,kind,record_id,token))
+        return {'deleted':True,'record_kind':kind,'id':record_id,'token':token}
+
+
+def restore_financial_record(user_id,payload):
+    record_id=core.record_id(payload.get('id'));kind=payload.get('record_kind');token=payload.get('token','')
+    if not isinstance(token,str) or len(token)<16:raise ValueError('Geri alma bilgisi geçersiz.')
+    with core.LOCK,core.connect() as db:
+        _write_lock(db,'users',user_id,user_id)
+        row=db.execute('SELECT token FROM financial_record_deletions WHERE user_id=? AND record_kind=? AND record_id=?',(user_id,kind,record_id)).fetchone()
+        if not row or row['token']!=token:raise Conflict('Bu silme işlemi geri alınmış veya kayıt yeniden silinmiş.')
+        db.execute('DELETE FROM financial_record_deletions WHERE user_id=? AND record_kind=? AND record_id=?',(user_id,kind,record_id))
+        return {'restored':True}
+
+
+def edit_simple_income(user_id,payload):
+    kind=payload.get('record_kind');record_id=core.record_id(payload.get('id'))
+    with core.LOCK,core.connect() as db:
+        _write_lock(db,'users',user_id,user_id)
+        data=read_data(user_id,db);row,_=managed_source(data,kind,record_id)
+        description,income_type,expected,note,amount,category=core._valid_income_fields({**row,**payload})
+        if kind not in ('income_record','income_rule'):raise ValueError('Gelir kaydını seçin.')
+        if payload.get('revision')!=managed_revision(data,kind,record_id):raise Conflict('Gelir başka bir ekranda değişti. Listeyi yenileyin.')
+        if category and not db.execute('SELECT 1 FROM categories WHERE user_id=? AND id=?',(user_id,category)).fetchone():raise ValueError('Kategori hesabınıza ait olmalı.')
+        if kind=='income_record':
+            if row['rule_id'] is not None and expected.isoformat()!=row['expected_on']:raise ValueError('Düzenli tahsilatın plan tarihi değiştirilemez; gerçek alınma tarihini değiştirebilirsin.')
+            status=payload.get('status',row['status'])
+            if status not in ('expected','received'):raise ValueError('Gelirin durumunu kontrol edin.')
+            received=date.fromisoformat(payload.get('received_on') or expected.isoformat()) if status=='received' else None
+            if received and (received>today() or received.isoformat()!=(payload.get('received_on') or expected.isoformat())):raise ValueError('Gerçek alınma tarihi gelecekte olamaz.')
+            db.execute('UPDATE income_records SET description=?,income_type=?,amount_minor=?,expected_on=?,received_on=?,status=?,note=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(description,income_type,amount,expected.isoformat(),received.isoformat() if received else None,status,note,record_id,user_id))
+        else:
+            frequency=payload.get('frequency');mode=payload.get('schedule_mode','anchored')
+            if frequency not in ('monthly','weekly') or mode not in ('anchored','last_day') or frequency=='weekly' and mode!='anchored':raise ValueError('Gelirin tekrar sıklığını kontrol edin.')
+            first=expected
+            if mode=='last_day':
+                month=date.fromisoformat(payload.get('start_month','')+'-01');first=core._month_close(month.year,month.month,31)
+            has_receipts=any(item['rule_id']==record_id and item['status']=='received' for item in data['income_records'])
+            if has_receipts and (frequency,mode,first.isoformat())!=(row['frequency'],row['schedule_mode'],row['start_on']):raise ValueError('Tahsilat geçmişi olan planın günü ve sıklığı değiştirilemez. Yeni tarih için ayrı gelir planı ekle; geçmiş tahsilatlar korunur.')
+            if row['end_on'] and first.isoformat()>row['end_on']:raise ValueError('Başlangıç tarihi planın bitişinden sonra olamaz.')
+            db.execute('UPDATE income_rules SET description=?,income_type=?,frequency=?,schedule_mode=?,start_on=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(description,income_type,frequency,mode,first.isoformat(),record_id,user_id))
+            if not has_receipts:db.execute('DELETE FROM income_rule_amounts WHERE user_id=? AND rule_id=?',(user_id,record_id))
+            effective=max(first,today()).isoformat() if has_receipts else first.isoformat()
+            db.execute('INSERT INTO income_rule_amounts(user_id,rule_id,effective_on,amount_minor) VALUES(?,?,?,?) ON CONFLICT(rule_id,effective_on) DO UPDATE SET amount_minor=excluded.amount_minor',(user_id,record_id,effective,amount))
+            # Keep previously materialized, unreceived projections aligned with the edited template.
+            for projected in data['income_records']:
+                if projected['rule_id']!=record_id or projected['status']!='expected':continue
+                due=date.fromisoformat(projected['expected_on'])
+                index=core.income_recurrence_index(first,frequency,max(first,due),mode)
+                belongs=due>=first and core.income_recurrence_date(first,frequency,index,mode)==due and (not row['end_on'] or projected['expected_on']<=row['end_on'])
+                if not belongs:db.execute("UPDATE income_records SET status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE user_id=? AND id=?",(user_id,projected['id']))
+                elif not has_receipts or projected['expected_on']>=effective:db.execute('UPDATE income_records SET amount_minor=?,description=?,updated_at=CURRENT_TIMESTAMP WHERE user_id=? AND id=?',(amount,description,user_id,projected['id']))
+        return {'id':record_id}

@@ -246,6 +246,21 @@ def create_app(test_config: dict | None = None) -> Flask:
         from simple_cashflow import save_payment_plan
         return simple_write(save_payment_plan)
 
+    @web.put('/api/simple-income')
+    def simple_income_edit_route():
+        from simple_cashflow import edit_simple_income
+        return simple_write(edit_simple_income)
+
+    @web.post('/api/simple-records/delete')
+    def simple_record_delete_route():
+        from simple_cashflow import delete_financial_record
+        return simple_write(delete_financial_record)
+
+    @web.post('/api/simple-records/restore')
+    def simple_record_restore_route():
+        from simple_cashflow import restore_financial_record
+        return simple_write(restore_financial_record)
+
     @web.post("/api/simple-income")
     def simple_income_save_route():
         from simple_cashflow import save_income_once,save_monthly_income
