@@ -29,6 +29,10 @@ def create_app(test_config: dict | None = None) -> Flask:
         core.validate_runtime_configuration()
         try:
             core.init_db()
+            from simple_cashflow import initialize
+            initialize()
+            import profile_settings
+            profile_settings.initialize()
         except Exception as _db_err:  # noqa: BLE001
             # Log but don't crash: DB may be temporarily unreachable on cold start.
             # All request handlers that need the DB will return 503 naturally.
@@ -94,10 +98,10 @@ def create_app(test_config: dict | None = None) -> Flask:
         diag = getattr(error, "diag", None)
         table_name = getattr(diag, "table_name", None)
         column_name = getattr(diag, "column_name", None)
-        primary_message = getattr(diag, "message_primary", None)
+        sqlstate = getattr(error, "pgcode", None)
         web.logger.error(
-            "Unhandled request error (%s; table=%r; column=%r; message=%r)\n%s",
-            type(error).__name__, table_name, column_name, primary_message, stack
+            "Unhandled request error (%s; table=%r; column=%r; sqlstate=%r)\n%s",
+            type(error).__name__, table_name, column_name, sqlstate, stack
         )
         # Avoid returning exception details (SQL, filesystem paths, request data) to clients.
         return json_error("Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.", 500)
@@ -180,6 +184,90 @@ def create_app(test_config: dict | None = None) -> Flask:
             changed = core.set_installment_status(session["user_id"], core.record_id(occurrence_id), data.get("status", ""), data.get("paid_on"))
             return jsonify(ok=True) if changed else json_error("Taksit bulunamadı.", 404)
         except (ValueError, TypeError): return json_error("Taksit durumunu kontrol edin.", 400)
+
+    def simple_write(operation):
+        session,error=auth(csrf=True)
+        if error:
+            return error
+        data=request_body()
+        if data is None:
+            return json_error("Geçersiz kayıt isteği.",400)
+        from simple_cashflow import Conflict
+        try:
+            return jsonify(operation(session["user_id"],data))
+        except Conflict as error:
+            return json_error(str(error),409)
+        except (ValueError,TypeError,OverflowError) as error:
+            message=str(error) if isinstance(error,ValueError) else ""
+            if not message or message.startswith(("invalid","Invalid","amount","date","end","Only")):
+                message="Tarih, tutar ve açıklama bilgilerini kontrol edin."
+            return json_error(message,400)
+
+    @web.get("/api/profile")
+    def profile_route():
+        session,error=auth()
+        if error:
+            return error
+        import profile_settings
+        return jsonify(profile_settings.get_profile(session["user_id"]))
+
+    @web.put("/api/profile")
+    def profile_save_route():
+        import profile_settings
+        return simple_write(profile_settings.save_name)
+
+    @web.post("/api/profile/cards")
+    def profile_card_save_route():
+        import profile_settings
+        return simple_write(profile_settings.save_card)
+
+    @web.post("/api/simple-payment-plans")
+    def simple_plan_save_route():
+        from simple_cashflow import save_payment_plan
+        return simple_write(save_payment_plan)
+
+    @web.post("/api/simple-income")
+    def simple_income_save_route():
+        from simple_cashflow import save_income_once,save_monthly_income
+        def save(user_id,data):
+            if data.get('frequency','once') not in ('once','monthly','weekly'):
+                raise ValueError('Gelir sıklığı tek seferlik, aylık veya haftalık olmalı.')
+            if data.get("frequency") in ("monthly","weekly"):
+                return save_monthly_income(user_id,data)
+            return save_income_once(user_id,data)
+        return simple_write(save)
+
+    @web.post("/api/simple-income/receive")
+    def simple_income_receive_route():
+        from simple_cashflow import receive_income
+        return simple_write(receive_income)
+
+    @web.post("/api/simple-payments/<rule_id>/complete")
+    def simple_payment_complete_route(rule_id):
+        session,error=auth(csrf=True)
+        if error:
+            return error
+        data=request_body()
+        if data is None:
+            return json_error("Geçersiz ödeme isteği.",400)
+        try:
+            from simple_cashflow import record_payment
+            return jsonify(record_payment(session["user_id"],core.record_id(rule_id),data))
+        except (ValueError,TypeError,OverflowError):
+            return json_error("Ödeme bilgilerini kontrol edin. Taksit zaten ödenmiş olabilir; tutar kalan borcu aşmamalı, gerçek ödeme tarihi gelecekte olmamalı.",400)
+
+    @web.get("/api/simple-cashflow")
+    def simple_cashflow_route():
+        session,error=auth()
+        if error:
+            return error
+        from simple_cashflow import overview,today
+        start=request.args.get("start",today().isoformat())
+        end=request.args.get("end",(today().replace(day=1)+core.timedelta(days=120)).isoformat())
+        try:
+            return jsonify(overview(session["user_id"],start,end))
+        except (ValueError,TypeError,OverflowError):
+            return json_error("Ödeme planının tarih aralığını kontrol edin.",400)
 
     @web.get("/api/summary")
     def summary_route():
