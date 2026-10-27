@@ -168,6 +168,9 @@ def overview(user_id,start_value,end_value):
     result["income_records"]=data["income_records"]
     result["income_rule_amounts"]=data["income_rule_amounts"]
     result['cash_position']=cash_position(data)
+    projection=projected_balance(data,end_value)
+    result['cash_position']['projected_balance_minor']=str(projection) if projection is not None else None
+    result['cash_position']['projected_on']=end_value
     result['statements']=[{**row,**{k:str(row[k]) for k in ('total_minor','paid_minor','remaining_minor')}} for row in statement_balances(data)]
     result["net_minor"]=str(result["net_minor"])
     result["totals"]={key:str(value) for key,value in result["totals"].items()}
@@ -528,3 +531,18 @@ def record_statement_payment(user_id,payload):
         if amount>remaining:raise ValueError('Ödeme ekstrenin kalan tutarını aşıyor.')
         result=db.execute('INSERT INTO card_repayments(user_id,card_id,statement_id,amount_minor,paid_on,note,client_request_key) VALUES(?,?,?,?,?,?,?)',(user_id,statement['card_id'],statement_id,amount,paid.isoformat(),'Ekstre ödemesi',key))
         return {'id':result.lastrowid,'created':True}
+
+
+def projected_balance(data,end_value,as_of=None):
+    """Current recorded cash plus still-unsettled inflows/outflows up to the end day."""
+    as_of=as_of or today();end=date.fromisoformat(end_value)
+    position=cash_position(data,as_of)
+    if position['balance_minor'] is None or end<as_of:return None
+    candidates=[as_of.isoformat()]
+    for key,field in (('recurring','start_on'),('income_rules','start_on'),('income_records','expected_on'),('statements','due_on')):
+        candidates.extend(row[field] for row in data.get(key,[]) if row.get(field) and row[field]<=end_value)
+    first=min(candidates)
+    if (end-date.fromisoformat(first)).days>3660:return None
+    pending=calculate(data,first,end_value,as_of)
+    changes=sum(row['cash_effect_minor'] for row in pending['events'] if row['status'] not in ('received','paid','completed'))
+    return int(position['balance_minor'])+changes

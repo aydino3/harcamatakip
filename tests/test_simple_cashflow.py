@@ -178,6 +178,17 @@ class SimpleCashflowTest(unittest.TestCase):
         self.assertEqual(finance.cash_position(finance.read_data(self.user),date(2024,1,31))['balance_minor'],'50000')
         with self.assertRaises(ValueError):finance.save_opening(self.user,{'amount':'-1','effective_on':'2024-01-01'})
 
+    def test_projected_balance_adds_opening_once_and_includes_unpaid_overdue(self):
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2024-01-10'})
+        self.plan(start_on='2024-01-09',end_on='2024-01-09')
+        finance.save_income_once(self.user,{'description':'Gelecek gelir','amount':'200','expected_on':'2024-01-31','status':'expected','request_key':'projection-income-001'})
+        data=finance.read_data(self.user)
+        self.assertEqual(finance.projected_balance(data,'2024-01-31',date(2024,1,10)),60000)
+        self.assertEqual(finance.cash_position(data,date(2024,1,10))['balance_minor'],'50000')
+        finance.record_payment(self.user,data['recurring'][0]['id'],{'amount':'25','scheduled_on':'2024-01-09','paid_on':'2024-01-10','request_key':'projection-paid-0001'})
+        self.assertEqual(finance.projected_balance(finance.read_data(self.user),'2024-01-31',date(2024,1,10)),60000)
+        self.assertIsNone(finance.projected_balance(data,'2024-01-09',date(2024,1,10)))
+
     def test_explicit_final_payment_is_included_even_if_day_is_earlier_than_first(self):
         self.plan(start_on="2024-12-09",end_on="2025-01-08")
         result=finance.overview(self.user,"2024-12-01","2025-01-31")
