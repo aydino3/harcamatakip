@@ -170,7 +170,7 @@ def calculate(data,start_value,end_value,as_of=None):
 def overview(user_id,start_value,end_value):
     data=read_data(user_id)
     result=calculate(data,start_value,end_value)
-    result["rules"]=[{**rule,"revision":rule_revision(rule)} for rule in data["recurring"]]
+    result["rules"]=[{**rule,"revision":rule_revision(rule),"scheduled_total_minor":str(sum(int(rule["amount_minor"]) for _ in payment_dates(rule,date.fromisoformat(start_value),date.fromisoformat(end_value))) if rule["status"]=="active" else 0)} for rule in data["recurring"]]
     result["income_rules"]=data["income_rules"]
     result["income_records"]=data["income_records"]
     result["income_rule_amounts"]=data["income_rule_amounts"]

@@ -188,6 +188,7 @@ class SimpleCashflowTest(unittest.TestCase):
         finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2024-01','amount':'300','version':0})
         before=finance.overview(self.user,'2024-01-01','2024-01-31')
         self.assertEqual(before['totals']['payments_planned_minor'],'30000')
+        self.assertEqual(before['rules'][0]['scheduled_total_minor'],'10000')
         self.assertEqual(len([e for e in before['events'] if e['kind']=='payment']),1)
         finance.save_opening(self.user,{'amount':'1000','effective_on':'2024-01-01'})
         payload={'card_ref':card,'month':'2024-01','amount':'75','paid_on':'2024-01-15','request_key':'monthly-card-paid-01'}
