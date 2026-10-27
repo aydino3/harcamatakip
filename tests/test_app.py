@@ -300,7 +300,7 @@ class AppTest(unittest.TestCase):
         self.assertIsNone(app.session_user(token))
         self.assertEqual(app.session_user(second_token)["user_id"],self.user_a)
         with app.connect() as db:
-            db.execute("UPDATE sessions SET expires_at=datetime('now','-1 second') WHERE token_hash=?",(app.hashlib.sha256(second_token.encode()).hexdigest(),))
+            db.execute("UPDATE auth_sessions_v2 SET expires_at=datetime('now','-1 second') WHERE token_hash=?",(app.hashlib.sha256(second_token.encode()).hexdigest(),))
         self.assertIsNone(app.session_user(second_token))
 
     def test_unknown_and_known_failed_logins_both_run_password_hashing(self):
@@ -1295,7 +1295,7 @@ class HttpApiTest(unittest.TestCase):
         for route in ("/api/backup","/api/backups","/backups/private.sqlite3","/static/backups/private.sqlite3"):
             self.assertEqual(self.request(self.b,route)[0],404)
         with app.connect() as db:
-            for table in ("categories","payment_methods","expenses","budgets","sessions","recurring_expenses","recurring_occurrences","income_records","income_rules","income_rule_amounts","credit_cards","card_statements","card_repayments","installment_plans","installment_occurrences"):
+            for table in ("categories","payment_methods","expenses","budgets","auth_sessions_v2","recurring_expenses","recurring_occurrences","income_records","income_rules","income_rule_amounts","credit_cards","card_statements","card_repayments","installment_plans","installment_occurrences"):
                 self.assertEqual(db.execute(f"SELECT COUNT(*) FROM {table} WHERE user_id=?",(user_a,)).fetchone()[0],0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM income_rules WHERE id=? AND user_id=?",(income_b,user_a)).fetchone()[0],0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM income_rules WHERE id=? AND user_id=?",(income_b,self.request(self.b,"/api/session")[1]["user_id"])).fetchone()[0],1)

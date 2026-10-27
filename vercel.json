@@ -14,5 +14,10 @@
   ],
   "regions": [
     "fra1"
-  ]
+  ],
+  "git": {
+    "deploymentEnabled": {
+      "finance/simple-payment-flow": false
+    }
+  }
 }

@@ -282,9 +282,9 @@ npx playwright install chromium
 PYTHON_BIN=.venv/bin/python npm run test:e2e
 ```
 
-Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to an existing compatible Chromium/Chrome binary to use it instead of Playwright's managed browser. The suite starts separate local and private-beta app processes on loopback, creates synthetic test accounts and CSV data in an OS temporary directory, tests 320px, 390px, 768px, and 1440px viewports, and removes its database and files at the end. It never reads the normal application database or workbook. This test runner requires the environment to permit Playwright to launch a browser process; it cannot attach to a separate in-app browser. In restricted macOS sandboxes, Chromium may start and then terminate with `SIGTRAP` (and cleanup can report `EPERM`), which prevents this Node E2E suite from running there. Use an unrestricted local development session for the repeatable suite, and do not report it as passed after a browser launch failure.
+Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to an existing compatible Chromium/Chrome binary to use it instead of Playwright's managed browser. The current suite starts an isolated loopback app with synthetic records in a temporary SQLite database. It covers login, read-only loading, partial payments, income receipt, payment-plan editing, profile/card persistence, and layout overflow at 320px, 390px, 768px and 1440px. The former UI suite is retained in `tests/archive/`. It never reads the normal application database or workbook. This test runner requires permission to launch Chromium; it cannot attach to the in-app browser. In restricted macOS sandboxes, Chromium can terminate with `SIGTRAP`; do not report that suite as passed. Local CUA checks are separate evidence.
 
-The test suite includes local WSGI HTTP integration tests that bind an ephemeral loopback port and covers recurring income and salary calendar boundaries, expense recurring frequencies, card statement boundaries, repayment accounting, installment rounding and idempotency, ownership, insight thresholds, authentication rate limits, production database path validation, health checks, backup/restore, and account deletion. There is no package build, linter, or type-check configuration in this project. Most UI copy lives in `static/app.js`'s `TEXT` object. API validation errors are Turkish strings in `webapp.py` and `app.py`; before adding another locale, move both UI and API messages into locale dictionaries.
+The test suite includes local WSGI HTTP integration tests that bind an ephemeral loopback port and covers recurring income and salary calendar boundaries, expense recurring frequencies, card statement boundaries, repayment accounting, installment rounding and idempotency, ownership, insight thresholds, authentication rate limits, production database path validation, health checks, backup/restore, and account deletion. There is no package build, linter, or type-check configuration in this project. Most current UI copy lives in `static/app.js`. API validation errors are Turkish strings in `webapp.py` and `app.py`; before adding another locale, move both UI and API messages into locale dictionaries.
 
 ### Continuous integration
 
@@ -296,3 +296,24 @@ The test suite includes local WSGI HTTP integration tests that bind an ephemeral
 2. Add editing and archiving for categories and payment methods.
 3. Add richer date-range filters and reporting.
 4. Verify persistent storage and encrypted off-site backup/restore before public deployment.
+
+
+## Local simple-payment review
+
+The current interface shows income dates, installment/payment dates, and the selected range's income minus payments. It labels this result as excluding opening balances. Card purchases remain distinct from actual cash payments. Profile and card definitions are under Profil ve Ayarlar; storing a card's specific due date creates no financial transaction. Existing cards remain visible and retain their history.
+
+The new schema additions are initialized by create_app: payment_events, nullable request keys, profile_cards, and users.display_name. They preserve existing financial rows. Take a verified database backup before production release; on rollback keep additive tables/columns and restore the prior code, never drop new payment records. The implementation plan tracks verification evidence and the mandatory user review gate before any deployment.
+
+For isolated PostgreSQL tests, set FINANCE_TEST_POSTGRES_ADMIN_DSN to a local test admin connection or FINANCE_TEST_PGLITE_SERVER to the local WASM server module. The helper rejects non-loopback test hosts. Clear live database environment variables before testing. WASM results do not replace production reconciliation or native PostgreSQL CI.
+
+
+### Reviewed payment entry model (27 October 2026)
+
+Income entry distinguishes one-time income and recurring income. Recurring income supports monthly or weekly schedules. Monthly last-day mode takes a start month, not an additional day, and resolves short months/leap years on the server. The redundant recurring-income list is removed from the current UI.
+
+Payment entry has three explicit types: card installments (card plus first/final payment dates), one-time card purchases (purchase date distinct from the selected card's stored payment due date), and bank/cash recurring payments (monthly/weekly frequency, first/final date, no card). The additive payment_plan_details table stores the owned card link and type; expenses appear only once in the selected-range cash plan. Missing/stale card due dates produce validation errors instead of invented deadlines. Card-date changes move only completely unpaid one-time plans; completed or partial payment history remains anchored.
+
+For local review of authorized account data, tools/local_review_sandbox.mjs proxies authentication through the read-only reviewer and all financial writes exclusively to an isolated, private local SQLite copy. Its Python worker removes production database variables, validates foreign keys, and reconciles source/copy totals before serving. This tool is local-only and is never part of production routing. Source passwords are not stored. User edits in this copy are not synchronized to production. Do not publish before explicit local approval.
+
+
+The overview defaults to a full calendar month and supports previous/next month navigation. Its income/payment/net cards and event list use that month. A separate general-total section retains the independently selected broader date range. Both views call the same read-only calculation endpoint. Run `node --test tests/monthly_overview.test.cjs` for month-boundary, separate-total, event-lookup, and response-race regressions.

@@ -6,7 +6,7 @@ When DATABASE_URL is set the wrapper:
     so that TEXT columns storing ISO timestamps compare correctly
   - translates INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING
   - translates IS ? → IS NOT DISTINCT FROM %s (for nullable column comparisons)
-  - injects RETURNING id into INSERT statements to emulate .lastrowid
+  - injects RETURNING for single integer primary keys into INSERT statements to emulate .lastrowid
   - skips PRAGMA and BEGIN IMMEDIATE statements
   - provides executescript() by splitting on ';' and executing each statement
   - provides dict-like row access via RealDictCursor
@@ -16,6 +16,10 @@ from __future__ import annotations
 
 import re
 import os
+
+
+class DatabaseConnectionError(RuntimeError):
+    """Connection failure without credentials or a private DSN in its text."""
 
 
 # ---------------------------------------------------------------------------
@@ -112,27 +116,42 @@ def _translate_placeholders(sql: str) -> str:
     return "".join(result)
 
 
-def _inject_returning(sql: str) -> tuple[str, bool]:
-    """Append RETURNING id to INSERT statements (for lastrowid emulation).
+# Mask SQL literals, quoted identifiers and comments before looking for clauses.
+# Keyword-like text inside a value is data, not an SQL clause.
+_SQL_NON_CODE = re.compile(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|--[^\n]*|/\*.*?\*/|(?P<dollar>\$[A-Za-z_0-9]*\$).*?(?P=dollar)", re.DOTALL)
+_IDENTIFIER = r'(?:"(?:""|[^"])+"|[A-Za-z_][A-Za-z_0-9$]*)'
+_INSERT_TABLE = re.compile(r'^\s*INSERT\s+(?:/\*OR_IGNORE\*/\s*)?INTO\s+(' + _IDENTIFIER + r'(?:\s*\.\s*' + _IDENTIFIER + r')?)', re.IGNORECASE)
 
-    If the statement was INSERT OR IGNORE, also appends ON CONFLICT DO NOTHING
-    before RETURNING so that conflicts are silently skipped and lastrowid is None.
+
+def _sql_code(sql: str) -> str:
+    return _SQL_NON_CODE.sub(lambda match: " " * len(match.group()), sql)
+
+
+def _insert_table(sql: str) -> str | None:
+    match = _INSERT_TABLE.match(sql)
+    return match.group(1) if match else None
+
+
+def _inject_returning(sql: str, identity_column: str | None) -> tuple[str, str | None]:
+    """Translate conflict handling and emulate lastrowid only for an actual key.
+
+    Explicit RETURNING stays available to the caller; it must not be consumed.
+    A table without a single integer primary key needs no synthetic RETURNING.
     """
-    stripped_lower = sql.strip().lower()
-    if not stripped_lower.startswith("insert"):
-        return sql, False
-    if "returning" in stripped_lower:
-        return sql, False
-
+    if not _insert_table(sql):
+        return sql, None
     base = sql.rstrip().rstrip(";")
-    is_or_ignore = "/*or_ignore*/" in base.lower()
-    # Remove the marker comment
+    is_or_ignore = bool(re.search(r'/\*OR_IGNORE\*/', base, re.IGNORECASE))
     base = re.sub(r'/\*OR_IGNORE\*/', '', base, flags=re.IGNORECASE).rstrip()
-
-    if is_or_ignore and "on conflict" not in base.lower():
-        base += " ON CONFLICT DO NOTHING"
-
-    return base + " RETURNING id", True
+    code = _sql_code(base)
+    returning = re.search(r'\bRETURNING\b', code, re.IGNORECASE)
+    if is_or_ignore and not re.search(r'\bON\s+CONFLICT\b', code, re.IGNORECASE):
+        position = returning.start() if returning else len(base)
+        base = base[:position].rstrip() + " ON CONFLICT DO NOTHING " + base[position:]
+    if returning or identity_column is None:
+        return base.rstrip(), None
+    quoted_column = '"' + identity_column.replace('"', '""') + '"'
+    return base.rstrip() + " RETURNING " + quoted_column, identity_column
 
 
 # ---------------------------------------------------------------------------
@@ -153,8 +172,9 @@ class _Row(dict):
 # ---------------------------------------------------------------------------
 
 class _PgCursor:
-    def __init__(self, raw_cursor):
+    def __init__(self, raw_cursor, identity_resolver):
         self._cur = raw_cursor
+        self._identity_resolver = identity_resolver
         self._lastrowid: int | None = None
         self.rowcount: int = 0
 
@@ -167,12 +187,15 @@ class _PgCursor:
         if translated is None:
             self.rowcount = 0
             return self
-        translated, has_returning = _inject_returning(translated)
+        table = _insert_table(translated)
+        identity = self._identity_resolver(table) if table and not re.search(r"\bRETURNING\b", _sql_code(translated), re.IGNORECASE) else None
+        translated, returned_column = _inject_returning(translated, identity)
         self._cur.execute(translated, params or ())
         self.rowcount = self._cur.rowcount if self._cur.rowcount != -1 else 0
-        if has_returning:
+        self._lastrowid = None
+        if returned_column:
             row = self._cur.fetchone()
-            self._lastrowid = row["id"] if row else None
+            self._lastrowid = row[returned_column] if row else None
             self.rowcount = 1 if row else 0
         return self
 
@@ -180,17 +203,21 @@ class _PgCursor:
         translated = _translate_sql(sql)
         if translated is None:
             return self
-        translated, has_returning = _inject_returning(translated)
-        if has_returning:
+        table = _insert_table(translated)
+        identity = self._identity_resolver(table) if table and not re.search(r"\bRETURNING\b", _sql_code(translated), re.IGNORECASE) else None
+        translated, returned_column = _inject_returning(translated, identity)
+        self.rowcount = 0
+        self._lastrowid = None
+        if returned_column:
             for params in seq_of_params:
                 self._cur.execute(translated, params)
                 row = self._cur.fetchone()
                 if row:
-                    self._lastrowid = row["id"]
+                    self._lastrowid = row[returned_column]
+                    self.rowcount += 1
         else:
-            from psycopg2.extras import execute_batch
-            execute_batch(self._cur, translated, list(seq_of_params))
-            self.rowcount = self._cur.rowcount
+            self._cur.executemany(translated, seq_of_params)
+            self.rowcount = max(self._cur.rowcount, 0)
         return self
 
     def fetchone(self):
@@ -218,6 +245,7 @@ class PgConnection:
         self._conn = raw_conn
         from psycopg2.extras import RealDictCursor
         self._cursor_factory = RealDictCursor
+        self._identity_columns = {}
 
     def __enter__(self):
         return self
@@ -234,6 +262,7 @@ class PgConnection:
 
     def rollback(self):
         self._conn.rollback()
+        self._identity_columns.clear()
 
     def close(self):
         self._conn.close()
@@ -246,12 +275,29 @@ class PgConnection:
         except Exception:
             return False
 
+    def _integer_primary_key(self, relation: str) -> str | None:
+        # Cache per connection/transaction, never across users or schemas.
+        if relation not in self._identity_columns:
+            with self._conn.cursor() as metadata:
+                metadata.execute(
+                    "SELECT a.attname FROM pg_index i "
+                    "JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=i.indkey[0] "
+                    "WHERE i.indrelid=to_regclass(%s) AND i.indisprimary AND i.indnkeyatts=1 "
+                    "AND a.atttypid IN ('smallint'::regtype,'integer'::regtype,'bigint'::regtype)",
+                    (relation,),
+                )
+                row = metadata.fetchone()
+            self._identity_columns[relation] = row[0] if row else None
+        return self._identity_columns[relation]
+
     def _new_cursor(self) -> _PgCursor:
-        return _PgCursor(self._conn.cursor(cursor_factory=self._cursor_factory))
+        return _PgCursor(self._conn.cursor(cursor_factory=self._cursor_factory), self._integer_primary_key)
 
     def execute(self, sql: str, params=()) -> _PgCursor:
         cur = self._new_cursor()
         cur.execute(sql, params)
+        if re.match(r"\s*(CREATE|ALTER|DROP)\b", sql, re.IGNORECASE):
+            self._identity_columns.clear()
         return cur
 
     def executemany(self, sql: str, seq_of_params) -> _PgCursor:
@@ -364,6 +410,6 @@ def connect_pg(database_url: str) -> PgConnection:
         kwargs = _pg_connect_kwargs(database_url)
         conn = psycopg2.connect(**kwargs)
     except Exception as exc:
-        raise RuntimeError(f"PostgreSQL bağlantısı kurulamadı: {exc}") from exc
+        raise DatabaseConnectionError("PostgreSQL bağlantısı kurulamadı.") from exc
     conn.autocommit = False
     return PgConnection(conn)
