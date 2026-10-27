@@ -103,8 +103,80 @@ class SimpleCashflowTest(unittest.TestCase):
         self.assertEqual(rows['rules'][0]['card_ref'],'')
         monthly={**base,'frequency':'monthly','start_on':'2024-01-31','end_on':'2024-03-29','request_key':'bank-monthly-key-01'}
         finance.save_payment_plan(self.user,monthly)
-        for change in ({'end_on':''},{'card_ref':self.card()},{'frequency':'yearly'}):
+        for change in ({'end_on':''},{'card_ref':self.card(self.other)},{'frequency':'yearly'}):
             with self.assertRaises(ValueError):finance.save_payment_plan(self.user,{**base,**change,'request_key':'invalid-bank-key-01'})
+
+    def test_regular_payment_card_is_optional_owned_and_not_an_extra(self):
+        card=self.card()
+        rule=self.plan(entry_kind='regular',card_ref=card,frequency='weekly',end_on='2024-01-23')
+        view=finance.overview(self.user,'2024-01-01','2024-01-31')
+        self.assertEqual(view['rules'][0]['card_ref'],card)
+        self.assertEqual(view['card_spending']['total_minor'],'0')
+        self.assertEqual(view['extra_budget']['fixed_minor'],'30000')
+        self.assertEqual(view['extra_budget']['fixed_gap_minor'],'30000')
+        self.assertEqual(finance.overview(self.other,'2024-01-01','2024-01-31')['card_spending']['count'],0)
+
+    def test_extra_spending_purchase_month_per_card_gross_survives_repayment(self):
+        card=self.card()
+        rule=finance.save_payment_plan(self.user,{'description':'Market','amount':'120.01','entry_kind':'expense','card_ref':card,'purchased_on':'2024-01-20','request_key':'extra-month-key-0001'})['id']
+        self.plan(entry_kind='installment',card_ref=card)
+        january=finance.overview(self.user,'2024-01-01','2024-01-31')
+        february=finance.overview(self.user,'2024-02-01','2024-02-29')
+        self.assertEqual(january['card_spending']['total_minor'],'12001')
+        self.assertEqual(january['card_spending']['count'],1)
+        self.assertEqual(january['card_spending']['cards'][0]['entries'][0]['payment_due_on'],'2024-02-05')
+        self.assertEqual(february['card_spending']['total_minor'],'0')
+        finance.record_payment(self.user,rule,{'scheduled_on':'2024-02-05','paid_on':'2024-02-05','amount':'30','request_key':'extra-paid-key-0001'})
+        self.assertEqual(finance.overview(self.user,'2024-01-01','2024-01-31')['card_spending'],january['card_spending'])
+        self.assertEqual(january['extra_budget']['fixed_minor'],'10000')
+        self.assertEqual(january['extra_budget']['excess_minor'],'12001')
+
+    def test_legacy_extras_exclude_installments_and_materialized_regular_expenses(self):
+        dataset={'cards':[{'id':1,'bank_name':'Test','display_name':'Kart','active':1}], 'statements':[{'id':2,'due_on':'2024-02-05'}],
+          'expenses':[{'id':i,'card_id':1,'statement_id':2,'spent_on':'2024-01-20','description':'Kayit','amount_minor':101,'installments_count':1} for i in (1,2,3)],
+          'installment_plans':[{'id':1,'expense_id':2}], 'occurrences':[{'expense_id':3}], 'recurring':[]}
+        extras=finance.card_spending(dataset,'2024-01-01','2024-01-31')
+        self.assertEqual((extras['count'],extras['total_minor']),(1,'101'))
+        self.assertEqual(finance.card_spending(dataset,'2024-02-01','2024-02-29')['total_minor'],'0')
+        view={'events':[{'recurring_id':5,'amount_minor':'50000'}], 'totals':{'income_received_minor':'10000','income_expected_minor':'60000'}}
+        dataset['recurring']=[{'id':5,'entry_kind':'regular'}]
+        budget=finance.extra_budget(dataset,view,'2024-01-01','2024-01-31')
+        self.assertEqual(budget['allowance_minor'],'20000')
+        self.assertEqual(budget['remaining_minor'],'19899')
+        self.assertEqual(budget['excess_minor'],'0')
+
+    def test_monthly_total_minus_card_fixed_payments_isolated_and_recalculates(self):
+        card=self.card()
+        other_card=self.card(display_name='İkinci kart')
+        rule=self.plan(entry_kind='installment',card_ref=card)
+        self.plan(entry_kind='regular',card_ref=card,amount='20',request_key='monthly-regular-001')
+        self.plan(entry_kind='installment',card_ref=other_card,amount='50',request_key='monthly-other-0001')
+        before=finance.overview(self.user,'2024-01-01','2024-01-31')
+        payload={'card_ref':card,'month':'2024-01','amount':'300.01','version':0}
+        self.assertEqual(finance.save_card_monthly_total(self.user,payload),{'version':1})
+        self.assertEqual(finance.save_card_monthly_total(self.user,payload),{'version':1})
+        view=finance.overview(self.user,'2024-01-01','2024-01-31')
+        row=next(row for row in view['card_monthly_debt']['cards'] if row['card_ref']==card)
+        self.assertEqual((row['total_minor'],row['installment_minor'],row['regular_minor'],row['extra_minor']),('30001','10000','2000','18001'))
+        self.assertEqual(view['totals'],before['totals'])
+        self.assertEqual(view['cash_position'],before['cash_position'])
+        with self.assertRaises(finance.Conflict):finance.save_card_monthly_total(self.user,{**payload,'amount':'310'})
+        self.assertEqual(finance.save_card_monthly_total(self.user,{**payload,'amount':'310','version':1}),{'version':2})
+        self.assertNotEqual(finance.overview(self.user,'2024-02-01','2024-02-29')['card_monthly_debt']['cards'][0]['source'],'entered')
+        with self.assertRaises(ValueError):finance.save_card_monthly_total(self.other,payload)
+        for patch in ({'amount':'-1'},{'month':'2024-13'},{'month':'2024-1'},{'version':True}):
+            with self.assertRaises(ValueError):finance.save_card_monthly_total(self.user,{**payload,**patch})
+        finance.save_card_monthly_total(self.user,{**payload,'amount':'10','version':2})
+        row=next(row for row in finance.overview(self.user,'2024-01-01','2024-01-31')['card_monthly_debt']['cards'] if row['card_ref']==card)
+        self.assertTrue(row['inconsistent']);self.assertIsNone(row['extra_minor'])
+
+    def test_monthly_total_missing_card_relationship_is_explicit(self):
+        self.card()
+        self.plan()
+        view=finance.overview(self.user,'2024-01-01','2024-01-31')
+        self.assertEqual(len(view['card_monthly_debt']['unassigned_installments']),1)
+        self.assertFalse(view['card_monthly_debt']['complete'])
+        self.assertIsNone(view['card_monthly_debt']['cards'][0]['total_minor'])
 
     def test_income_api_accepts_weekly_and_month_end_and_rejects_unknown_frequency(self):
         client=webapp.create_app({'TESTING':True,'PRIVATE_BETA':False}).test_client()

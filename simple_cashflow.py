@@ -57,6 +57,9 @@ def read_data(user_id):
             ("payment_events","payment_events","paid_on,id"),
             ("statements","card_statements","due_on,id"),
             ("cards","credit_cards","id"),
+            ("profile_cards","profile_cards","id"),
+            ("card_monthly_totals","card_monthly_totals","month,card_ref"),
+            ("payment_methods","payment_methods","id"),
             ("installment_plans","installment_plans","id"),
             ("installment_occurrences","installment_occurrences","due_on,id"),
         ):
@@ -64,7 +67,8 @@ def read_data(user_id):
         details={row['recurring_id']:dict(row) for row in db.execute('SELECT * FROM payment_plan_details WHERE user_id=?',(user_id,))}
         for rule in data['recurring']:
             extra=details.get(rule['id'],{})
-            rule.update(entry_kind=extra.get('entry_kind','installment'),purchased_on=extra.get('purchased_on'),card_ref=('legacy:'+str(extra['legacy_card_id'])) if extra.get('legacy_card_id') else ('card:'+str(extra['profile_card_id'])) if extra.get('profile_card_id') else '')
+            fallback=legacy_entry_kind(rule,data['payment_methods'])
+            rule.update(entry_kind=extra.get('entry_kind',fallback),purchased_on=extra.get('purchased_on'),card_ref=('legacy:'+str(extra['legacy_card_id'])) if extra.get('legacy_card_id') else ('card:'+str(extra['profile_card_id'])) if extra.get('profile_card_id') else '')
         opening=db.execute("SELECT opening_balance_minor,effective_on FROM cash_settings WHERE user_id=?",(user_id,)).fetchone()
         data["opening"]=dict(opening) if opening else None
     return data
@@ -171,6 +175,9 @@ def overview(user_id,start_value,end_value):
     projection=projected_balance(data,end_value)
     result['cash_position']['projected_balance_minor']=str(projection) if projection is not None else None
     result['cash_position']['projected_on']=end_value
+    result['card_spending']=card_spending(data,start_value,end_value)
+    result['extra_budget']=extra_budget(data,result,start_value,end_value)
+    result['card_monthly_debt']=monthly_card_debt(data,start_value[:7])
     result['statements']=[{**row,**{k:str(row[k]) for k in ('total_minor','paid_minor','remaining_minor')}} for row in statement_balances(data)]
     result["net_minor"]=str(result["net_minor"])
     result["totals"]={key:str(value) for key,value in result["totals"].items()}
@@ -202,6 +209,15 @@ def initialize():
             FOREIGN KEY(recurring_id,user_id) REFERENCES recurring_expenses(id,user_id) ON DELETE CASCADE,
             FOREIGN KEY(legacy_card_id,user_id) REFERENCES credit_cards(id,user_id),
             FOREIGN KEY(profile_card_id,user_id) REFERENCES profile_cards(id,user_id))""")
+        db.execute(f"""CREATE TABLE IF NOT EXISTS card_monthly_totals (
+            user_id {integer} NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            card_ref TEXT NOT NULL,month TEXT NOT NULL,amount_minor {integer} NOT NULL CHECK(amount_minor>=0),
+            version {integer} NOT NULL DEFAULT 1,PRIMARY KEY(user_id,card_ref,month))""")
+        if pg:
+            db.execute('ALTER TABLE card_monthly_totals ENABLE ROW LEVEL SECURITY')
+            for role in ('PUBLIC','anon','authenticated'):
+                if role=='PUBLIC' or db.execute('SELECT 1 FROM pg_roles WHERE rolname=?',(role,)).fetchone():
+                    db.execute(f'REVOKE ALL ON card_monthly_totals FROM {role}')
         db.execute('CREATE INDEX IF NOT EXISTS payment_details_user_card ON payment_plan_details(user_id,profile_card_id,legacy_card_id)')
         db.execute("CREATE INDEX IF NOT EXISTS payment_events_user_date ON payment_events(user_id,paid_on)")
         db.execute("CREATE INDEX IF NOT EXISTS payment_events_occurrence ON payment_events(user_id,recurring_id,scheduled_on)")
@@ -299,14 +315,15 @@ def save_payment_plan(user_id,payload):
         old=db.execute('SELECT * FROM recurring_expenses WHERE id=? AND user_id=?',(record_id,user_id)).fetchone() if record_id else None
         if record_id and (not old or old['status']=='cancelled'):raise ValueError('Ödeme planı bulunamadı.')
         old_detail=db.execute('SELECT * FROM payment_plan_details WHERE recurring_id=? AND user_id=?',(record_id,user_id)).fetchone() if old else None
-        old_meta=_detail_fields(old_detail)
+        methods=[dict(row) for row in db.execute('SELECT id,name FROM payment_methods WHERE user_id=?',(user_id,))]
+        old_meta=_detail_fields(old_detail,legacy_entry_kind(dict(old),methods) if old else 'installment')
         kind=payload.get('entry_kind',old_meta['entry_kind'])
         if kind not in ('expense','installment','regular'):raise ValueError('Ödeme türünü kontrol edin.')
         reference=payload.get('card_ref',old_meta['card_ref']) or ''
-        if kind=='regular' and reference:raise ValueError('Banka / nakit ödemesi kredi kartına bağlanamaz.')
         card=profile_settings.resolve_card(db,user_id,reference) if reference else None
         if card and not card['active'] and reference!=old_meta['card_ref']:raise ValueError('Pasif kartla yeni işlem eklenemez.')
         if not old and card and not card['active']:raise ValueError('Pasif kartla yeni işlem eklenemez.')
+        if kind=='installment' and payload.get('entry_kind')=='installment' and not old and not reference:raise ValueError('Aylık taksit için kredi kartını seçin.')
         purchase=None
         if kind=='expense':
             if not card:raise ValueError('Harcama için bir kredi kartı seçin.')
@@ -352,8 +369,8 @@ def save_payment_plan(user_id,payload):
         return {'id':record_id}
 
 
-def _detail_fields(row):
-    return {'entry_kind':row['entry_kind'] if row else 'installment','card_ref':('legacy:'+str(row['legacy_card_id'])) if row and row['legacy_card_id'] else ('card:'+str(row['profile_card_id'])) if row and row['profile_card_id'] else '', 'purchased_on':row['purchased_on'] if row else None}
+def _detail_fields(row,fallback='installment'):
+    return {'entry_kind':row['entry_kind'] if row else fallback,'card_ref':('legacy:'+str(row['legacy_card_id'])) if row and row['legacy_card_id'] else ('card:'+str(row['profile_card_id'])) if row and row['profile_card_id'] else '', 'purchased_on':row['purchased_on'] if row else None}
 
 
 def save_income_once(user_id,payload):
@@ -546,3 +563,101 @@ def projected_balance(data,end_value,as_of=None):
     pending=calculate(data,first,end_value,as_of)
     changes=sum(row['cash_effect_minor'] for row in pending['events'] if row['status'] not in ('received','paid','completed'))
     return int(position['balance_minor'])+changes
+
+
+def legacy_entry_kind(rule,methods):
+    method=next((row['name'].casefold() for row in methods if row['id']==rule.get('payment_method_id')),'')
+    return 'regular' if method in ('nakit','banka kartı') else 'installment'
+
+
+def card_spending(data,start_value,end_value):
+    """Purchase-month extras by owned card, independent of settlement cashflow."""
+    groups={}
+    for card in data.get('cards',[]):
+        groups['legacy:'+str(card['id'])]={'card_ref':'legacy:'+str(card['id']),'bank_name':card['bank_name'],'display_name':card['display_name'],'active':card['active'],'entries':[]}
+    for card in data.get('profile_cards',[]):
+        if card['legacy_card_id'] is None:groups['card:'+str(card['id'])]={'card_ref':'card:'+str(card['id']),'bank_name':card['bank_name'],'display_name':card['display_name'],'active':card['active'],'entries':[]}
+    planned_installments={row['expense_id'] for row in data.get('installment_plans',[])}
+    recurring_expenses={row['expense_id'] for row in data.get('occurrences',[]) if row.get('expense_id') is not None}
+    statements={row['id']:row for row in data.get('statements',[])}
+    for expense in data.get('expenses',[]):
+        ref='legacy:'+str(expense['card_id'])
+        if expense['card_id'] is None or ref not in groups or expense['id'] in planned_installments or expense['id'] in recurring_expenses or expense.get('installments_count',1)>1:continue
+        if start_value<=expense['spent_on']<=end_value:
+            groups[ref]['entries'].append({'id':'expense:'+str(expense['id']),'description':expense['description'],'purchased_on':expense['spent_on'],'payment_due_on':statements.get(expense['statement_id'],{}).get('due_on'),'amount_minor':str(expense['amount_minor'])})
+    for rule in data.get('recurring',[]):
+        ref=rule.get('card_ref')
+        if rule.get('entry_kind')!='expense' or rule['status']=='cancelled' or ref not in groups or not rule.get('purchased_on'):continue
+        if start_value<=rule['purchased_on']<=end_value:
+            groups[ref]['entries'].append({'id':'plan:'+str(rule['id']),'description':rule['description'],'purchased_on':rule['purchased_on'],'payment_due_on':rule['start_on'],'amount_minor':str(rule['amount_minor'])})
+    cards=[]
+    for group in groups.values():
+        group['entries'].sort(key=lambda row:(row['purchased_on'],row['id']))
+        group['count']=len(group['entries']);group['total_minor']=str(sum(int(row['amount_minor']) for row in group['entries']))
+        if group['active'] or group['count']:cards.append(group)
+    cards.sort(key=lambda row:(row['bank_name'].casefold(),row['display_name'].casefold()))
+    return {'cards':cards,'total_minor':str(sum(int(row['total_minor']) for row in cards)),'count':sum(row['count'] for row in cards),'start_on':start_value,'end_on':end_value}
+
+
+def extra_budget(data,view,start_value,end_value):
+    """Income envelope for variable purchases; never added again to cashflow totals."""
+    rules={row['id']:row for row in data.get('recurring',[])}
+    first,last=date.fromisoformat(start_value),date.fromisoformat(end_value)
+    fixed=sum(int(rule['amount_minor']) for rule in rules.values() if rule['status']=='active' and rule.get('entry_kind','installment')!='expense' for _ in payment_dates(rule,first,last))
+    statement_dates={row['id']:row['due_on'] for row in data.get('statements',[])}
+    fixed+=sum(row['amount_minor'] for row in data.get('installment_occurrences',[]) if row['status']!='cancelled' and row.get('statement_id') in statement_dates and start_value<=statement_dates[row['statement_id']]<=end_value)
+    income=int(view['totals']['income_received_minor'])+int(view['totals']['income_expected_minor'])
+    extras=int(card_spending(data,start_value,end_value)['total_minor'])
+    allowance=income-fixed
+    return {key:str(value) for key,value in {'income_minor':income,'fixed_minor':fixed,'allowance_minor':max(0,allowance),'extra_spent_minor':extras,'remaining_minor':allowance-extras,'excess_minor':max(0,extras-max(0,allowance)),'fixed_gap_minor':max(0,-allowance)}.items()}
+
+
+def monthly_card_debt(data,month):
+    from calendar import monthrange
+    first=date.fromisoformat(month+'-01');last=first.replace(day=monthrange(first.year,first.month)[1])
+    cards=card_spending(data,first.isoformat(),last.isoformat())['cards']
+    saved={row['card_ref']:row for row in data.get('card_monthly_totals',[]) if row['month']==month}
+    statements=statement_balances(data)
+    unassigned=[]
+    fixed={card['card_ref']:{'installment_minor':0,'regular_minor':0} for card in cards}
+    for rule in data.get('recurring',[]):
+        if rule['status']!='active' or rule.get('entry_kind')=='expense':continue
+        amount=sum(int(rule['amount_minor']) for _ in payment_dates(rule,first,last))
+        ref=rule.get('card_ref')
+        if ref in fixed:fixed[ref]['regular_minor' if rule.get('entry_kind')=='regular' else 'installment_minor']+=amount
+        elif amount and rule.get('entry_kind','installment')=='installment':unassigned.append({'id':rule['id'],'description':rule['description'],'amount_minor':str(amount)})
+    statements_by_id={row['id']:row for row in data.get('statements',[])}
+    for occurrence in data.get('installment_occurrences',[]):
+        statement=statements_by_id.get(occurrence.get('statement_id'))
+        if statement and occurrence['status']!='cancelled' and statement['due_on'][:7]==month:
+            ref='legacy:'+str(statement['card_id'])
+            if ref in fixed:fixed[ref]['installment_minor']+=int(occurrence['amount_minor'])
+    rows=[]
+    for card in cards:
+        ref=card['card_ref'];manual=saved.get(ref);known=[row for row in statements if 'legacy:'+str(row['card_id'])==ref and row['due_on'][:7]==month]
+        planned=sum(int(rule['amount_minor']) for rule in data.get('recurring',[]) if rule['status']=='active' and rule.get('card_ref')==ref for _ in payment_dates(rule,first,last))
+        gross=int(manual['amount_minor']) if manual else sum(int(row['total_minor']) for row in known)+planned if known or planned else None
+        parts=fixed[ref];extra=gross-sum(parts.values()) if gross is not None else None
+        rows.append({'card_ref':ref,'bank_name':card['bank_name'],'display_name':card['display_name'],'version':manual['version'] if manual else 0,'source':'entered' if manual else 'statement' if known or planned else 'missing','total_minor':str(gross) if gross is not None else None,**{key:str(value) for key,value in parts.items()},'extra_minor':str(extra) if extra is not None and extra>=0 else None,'inconsistent':extra is not None and extra<0})
+    return {'month':month,'cards':rows,'unassigned_installments':unassigned,'extra_minor':str(sum(int(row['extra_minor']) for row in rows if row['extra_minor'] is not None)),'complete':all(row['total_minor'] is not None and not row['inconsistent'] for row in rows) and not unassigned}
+
+
+def save_card_monthly_total(user_id,payload):
+    import profile_settings,re
+    month=payload.get('month','')
+    if not isinstance(month,str) or not re.fullmatch(r'\d{4}-\d{2}',month):raise ValueError('Borç ayını seçin.')
+    date.fromisoformat(month+'-01')
+    amount=core.money_to_minor(payload.get('amount'))
+    if amount<0:raise ValueError('Toplam kart borcu negatif olamaz.')
+    ref=payload.get('card_ref','')
+    version=payload.get('version',0)
+    if isinstance(version,bool) or not isinstance(version,int) or version<0:raise ValueError('Kayıt sürümü geçersiz.')
+    with core.LOCK,core.connect() as db:
+        _write_lock(db,'users',user_id,user_id)
+        card=profile_settings.resolve_card(db,user_id,ref)
+        if not card['active']:raise ValueError('Pasif kartın borcunu güncellemeden önce kartı etkinleştirin.')
+        old=db.execute('SELECT amount_minor,version FROM card_monthly_totals WHERE user_id=? AND card_ref=? AND month=?',(user_id,ref,month)).fetchone()
+        if old and old['amount_minor']==amount:return {'version':old['version']}
+        if (old['version'] if old else 0)!=version:raise Conflict('Kart borcu başka bir ekranda değişti. Sayfayı yenileyin.')
+        db.execute('INSERT INTO card_monthly_totals(user_id,card_ref,month,amount_minor,version) VALUES(?,?,?,?,1) ON CONFLICT(user_id,card_ref,month) DO UPDATE SET amount_minor=excluded.amount_minor,version=card_monthly_totals.version+1',(user_id,ref,month,amount))
+        return {'version':version+1}
