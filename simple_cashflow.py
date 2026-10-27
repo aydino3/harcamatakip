@@ -655,6 +655,7 @@ def save_card_monthly_total(user_id,payload):
     with core.LOCK,core.connect() as db:
         _write_lock(db,'users',user_id,user_id)
         card=profile_settings.resolve_card(db,user_id,ref)
+        ref=card['kind']+':'+str(card['record_id'])
         if not card['active']:raise ValueError('Pasif kartın borcunu güncellemeden önce kartı etkinleştirin.')
         old=db.execute('SELECT amount_minor,version FROM card_monthly_totals WHERE user_id=? AND card_ref=? AND month=?',(user_id,ref,month)).fetchone()
         if old and old['amount_minor']==amount:return {'version':old['version']}
