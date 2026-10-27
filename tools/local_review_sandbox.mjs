@@ -7,7 +7,7 @@ import {randomBytes} from 'node:crypto';
 export async function start(snapshot,root,python,reviewUrl){
  const expected=snapshot.recurring.map(row=>row.id).sort((a,b)=>a-b).join(',');
  const csrf=randomBytes(32).toString('hex'),cache=new Map();
- const child=spawn(python,['tools/local_review_sandbox.py'],{cwd:root,env:{PATH:'/usr/bin:/bin:/opt/homebrew/bin',APP_ENV:'development',PRIVATE_BETA:'0',LANG:'en_US.UTF-8'}});
+ const child=spawn(python,['tools/local_review_sandbox.py'],{cwd:root,env:{PATH:process.env.PATH||'/usr/bin:/bin',...(process.env.LD_LIBRARY_PATH?{LD_LIBRARY_PATH:process.env.LD_LIBRARY_PATH}:{}),APP_ENV:'development',PRIVATE_BETA:'0',LANG:'en_US.UTF-8'}});
  const backend=await new Promise((resolve,reject)=>{let output='';child.stdout.on('data',chunk=>{output+=chunk;if(output.includes('\n')){try{resolve(JSON.parse(output.slice(0,output.indexOf('\n'))))}catch{reject(Error('Yerel çalışma kopyası başlatılamadı.'))}}});child.stderr.on('data',chunk=>{const safe=String(chunk).split('\n').filter(line=>line.startsWith('REVIEW_ERROR '));for(const line of safe)process.stderr.write(line+'\n')});child.on('error',reject);child.on('exit',()=>reject(Error('Yerel çalışma kopyası hazırlanamadı.')));child.stdin.end(JSON.stringify(snapshot));});
  snapshot=null;
  async function authenticated(cookie){if(!cookie)return false;if((cache.get(cookie)||0)>Date.now())return true;const response=await fetch(reviewUrl+'/api/recurring',{headers:{Cookie:cookie}});if(!response.ok)return false;const body=await response.json();if(body.rules.map(row=>row.id).sort((a,b)=>a-b).join(',')!==expected)return false;cache.set(cookie,Date.now()+60000);return true;}
