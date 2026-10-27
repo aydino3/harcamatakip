@@ -139,7 +139,7 @@ class SimpleCashflowTest(unittest.TestCase):
         self.assertEqual((extras['count'],extras['total_minor']),(1,'101'))
         self.assertEqual(finance.card_spending(dataset,'2024-02-01','2024-02-29')['total_minor'],'0')
         view={'events':[{'recurring_id':5,'amount_minor':'50000'}], 'totals':{'income_received_minor':'10000','income_expected_minor':'60000'}}
-        dataset['recurring']=[{'id':5,'entry_kind':'regular'}]
+        dataset['recurring']=[{'id':5,'entry_kind':'regular','amount_minor':50000,'status':'active','frequency':'monthly','start_on':'2024-01-09','end_on':'2024-01-09'}]
         budget=finance.extra_budget(dataset,view,'2024-01-01','2024-01-31')
         self.assertEqual(budget['allowance_minor'],'20000')
         self.assertEqual(budget['remaining_minor'],'19899')
