@@ -221,6 +221,11 @@ def create_app(test_config: dict | None = None) -> Flask:
         import profile_settings
         return simple_write(profile_settings.save_card)
 
+    @web.post('/api/simple-card-monthly-payments')
+    def simple_card_monthly_payment_route():
+        from simple_cashflow import record_card_monthly_payment
+        return simple_write(record_card_monthly_payment)
+
     @web.put('/api/simple-card-monthly-total')
     def simple_card_monthly_total_route():
         from simple_cashflow import save_card_monthly_total

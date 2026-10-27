@@ -158,7 +158,8 @@ class SimpleCashflowTest(unittest.TestCase):
         view=finance.overview(self.user,'2024-01-01','2024-01-31')
         row=next(row for row in view['card_monthly_debt']['cards'] if row['card_ref']==card)
         self.assertEqual((row['total_minor'],row['installment_minor'],row['regular_minor'],row['extra_minor']),('30001','10000','2000','18001'))
-        self.assertEqual(view['totals'],before['totals'])
+        self.assertEqual(view['totals']['payments_planned_minor'],'35001')
+        self.assertEqual(sum(int(e['amount_minor']) for e in view['events'] if e['kind']=='payment'),35001)
         self.assertEqual(view['cash_position'],before['cash_position'])
         with self.assertRaises(finance.Conflict):finance.save_card_monthly_total(self.user,{**payload,'amount':'310'})
         self.assertEqual(finance.save_card_monthly_total(self.user,{**payload,'amount':'310','version':1}),{'version':2})
@@ -178,6 +179,41 @@ class SimpleCashflowTest(unittest.TestCase):
         self.assertFalse(view['card_monthly_debt']['complete'])
         self.assertIsNone(view['card_monthly_debt']['cards'][0]['total_minor'])
 
+    def test_authoritative_card_total_includes_installments_and_partial_payments_once(self):
+        from unittest.mock import patch
+        from datetime import date
+        card=self.card(payment_due_on='2024-01-20')
+        self.plan(entry_kind='installment',card_ref=card,amount='100',start_on='2024-01-20',end_on='2024-03-20')
+        finance.save_payment_plan(self.user,{'description':'Market','amount':'20','entry_kind':'expense','card_ref':card,'purchased_on':'2024-01-01','request_key':'monthly-core-extra-01'})
+        finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2024-01','amount':'300','version':0})
+        before=finance.overview(self.user,'2024-01-01','2024-01-31')
+        self.assertEqual(before['totals']['payments_planned_minor'],'30000')
+        self.assertEqual(len([e for e in before['events'] if e['kind']=='payment']),1)
+        finance.save_opening(self.user,{'amount':'1000','effective_on':'2024-01-01'})
+        payload={'card_ref':card,'month':'2024-01','amount':'75','paid_on':'2024-01-15','request_key':'monthly-card-paid-01'}
+        self.assertTrue(finance.record_card_monthly_payment(self.user,payload)['created'])
+        self.assertFalse(finance.record_card_monthly_payment(self.user,payload)['created'])
+        after=finance.overview(self.user,'2024-01-01','2024-01-31')
+        self.assertEqual(after['totals']['payments_paid_minor'],'7500')
+        self.assertEqual(after['totals']['payments_planned_minor'],'22500')
+        self.assertEqual(after['net_minor'],'-30000')
+        self.assertEqual(after['cash_position']['balance_minor'],'92500')
+        with self.assertRaises(ValueError):finance.record_card_monthly_payment(self.user,{**payload,'amount':'226','request_key':'monthly-card-paid-02'})
+        with self.assertRaises(ValueError):finance.record_card_monthly_payment(self.other,payload)
+        with self.assertRaises(ValueError):finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2024-01','amount':'74','version':1})
+        with self.assertRaises(finance.Conflict):finance.record_card_monthly_payment(self.user,{**payload,'amount':'70'})
+
+    def test_authoritative_card_total_preserves_existing_payment_and_month_boundary(self):
+        card=self.card(payment_due_on='2024-02-29')
+        rule=self.plan(entry_kind='installment',card_ref=card,amount='100',start_on='2024-02-29',end_on='2024-03-29')
+        finance.record_payment(self.user,rule,{'scheduled_on':'2024-02-29','paid_on':'2024-01-31','amount':'25','request_key':'monthly-old-paid-01'})
+        finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2024-02','amount':'300','version':0})
+        feb=finance.overview(self.user,'2024-02-01','2024-02-29')
+        self.assertEqual(feb['totals']['payments_planned_minor'],'27500')
+        self.assertEqual(feb['events'][0]['date'],'2024-02-29')
+        self.assertEqual(finance.overview(self.user,'2024-01-01','2024-01-31')['totals']['payments_paid_minor'],'2500')
+        self.assertEqual(finance.overview(self.user,'2024-03-01','2024-03-31')['totals']['payments_planned_minor'],'10000')
+
     def test_income_api_accepts_weekly_and_month_end_and_rejects_unknown_frequency(self):
         client=webapp.create_app({'TESTING':True,'PRIVATE_BETA':False}).test_client()
         login=client.post('/api/login',json={'email':'cashflow-fixture@example.invalid','password':'synthetic-only-password'})
@@ -193,6 +229,23 @@ class SimpleCashflowTest(unittest.TestCase):
         card=core.save_credit_card(self.user,{'bank_name':'Sentetik','display_name':'Ekstre kartı','closing_day':22,'due_day':3})
         expense=core.save_expense(self.user,{'amount':amount,'spent_on':spent,'description':'Ekstre alışverişi','card_id':card,'installments_count':installments,'first_installment_on':spent})
         return card,expense
+
+    def test_total_statement_includes_linked_installment_without_double_counting(self):
+        card,expense=self.statement_purchase(amount='300')
+        ref='legacy:'+str(card)
+        self.plan(entry_kind='installment',card_ref=ref,amount='100',start_on='2024-02-03',end_on='2024-03-03')
+        statement=finance.overview(self.user,'2024-02-01','2024-02-29')['statements'][0]
+        finance.record_statement_payment(self.user,{'statement_id':statement['id'],'amount':'30','paid_on':'2024-02-01','request_key':'total-legacy-paid-01'})
+        finance.save_card_monthly_total(self.user,{'card_ref':ref,'month':'2024-02','amount':'300','version':0})
+        view=finance.overview(self.user,'2024-02-01','2024-02-29')
+        self.assertEqual(view['totals']['payments_paid_minor'],'3000')
+        self.assertEqual(view['totals']['payments_planned_minor'],'27000')
+        self.assertEqual(view['net_minor'],'-30000')
+        self.assertTrue(view['statements'][0]['covered_by_monthly_total'])
+        self.assertEqual(view['card_monthly_debt']['cards'][0]['extra_minor'],'20000')
+        finance.record_card_monthly_payment(self.user,{'card_ref':ref,'month':'2024-02','amount':'70','paid_on':'2024-02-02','request_key':'total-monthly-paid-01'})
+        self.assertEqual(finance.overview(self.user,'2024-02-01','2024-02-29')['net_minor'],'-30000')
+        self.assertEqual(len(finance.read_data(self.user)['expenses']),1)
 
     def test_existing_card_purchase_forecasts_on_statement_due_not_purchase_day(self):
         card,expense=self.statement_purchase()
