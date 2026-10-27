@@ -146,7 +146,7 @@ class SimpleCashflowTest(unittest.TestCase):
         self.assertEqual(budget['excess_minor'],'0')
 
     def test_monthly_total_minus_card_fixed_payments_isolated_and_recalculates(self):
-        card=self.card()
+        card=self.card(payment_due_on='2024-01-09')
         other_card=self.card(display_name='İkinci kart')
         rule=self.plan(entry_kind='installment',card_ref=card)
         self.plan(entry_kind='regular',card_ref=card,amount='20',request_key='monthly-regular-001')
@@ -225,6 +225,48 @@ class SimpleCashflowTest(unittest.TestCase):
         del payload['expected_on']
         self.assertEqual(client.post('/api/simple-income',json=payload,headers=headers).status_code,200)
         self.assertEqual(client.post('/api/simple-income',json={**base,'frequency':'yearly'},headers=headers).status_code,400)
+
+    def test_exact_card_due_date_is_never_rebased_onto_the_selected_month(self):
+        card=self.card(payment_due_on='2026-11-09')
+        plan=self.plan(entry_kind='installment',card_ref=card,start_on='2026-11-09',end_on='2026-12-09')
+        with self.assertRaisesRegex(finance.Conflict,'09.11.2026'):
+            finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2026-10','amount':'300','version':0})
+        self.assertEqual(finance.read_data(self.user)['card_monthly_totals'],[])
+        finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2026-11','due_on':'2026-11-09','amount':'300','version':0})
+        november=finance.overview(self.user,'2026-11-01','2026-11-30')
+        row=november['card_monthly_debt']['cards'][0]
+        self.assertEqual((row['due_on'],row['installment_minor'],row['extra_minor']),('2026-11-09','10000','20000'))
+        self.assertEqual(finance.overview(self.user,'2026-10-01','2026-10-31')['totals']['payments_planned_minor'],'0')
+        import profile_settings
+        original=profile_settings.get_profile(self.user)['cards'][0]
+        profile_settings.save_card(self.user,{**original,'payment_due_on':'2026-12-09'})
+        row=finance.overview(self.user,'2026-11-01','2026-11-30')['card_monthly_debt']['cards'][0]
+        self.assertEqual(row['due_on'],'2026-11-09');self.assertEqual(row['due_date_explicit'],1)
+
+    def test_correcting_legacy_wrong_invoice_month_preserves_actual_payment_day(self):
+        card=self.card(payment_due_on='2026-11-09')
+        self.plan(entry_kind='installment',card_ref=card,start_on='2026-11-09',end_on='2026-12-09')
+        finance.save_opening(self.user,{'amount':'1000','effective_on':'2024-01-01'})
+        with core.connect() as db:
+            db.execute('INSERT INTO card_monthly_totals(user_id,card_ref,month,amount_minor,version,due_on) VALUES(?,?,?,?,1,?)',(self.user,card,'2026-10',30000,'2026-10-09'))
+            db.execute('INSERT INTO card_monthly_payments(user_id,card_ref,month,amount_minor,paid_on,idempotency_key) VALUES(?,?,?,?,?,?)',(self.user,card,'2026-10',5000,'2024-01-02','period-correction-paid-01'))
+        cash=finance.overview(self.user,'2026-10-01','2026-10-31')['cash_position']['balance_minor']
+        payload={'card_ref':card,'source_month':'2026-10','month':'2026-11','due_on':'2026-11-09','amount':'300','version':1}
+        self.assertEqual(finance.save_card_monthly_total(self.user,payload),{'version':2})
+        self.assertEqual(finance.save_card_monthly_total(self.user,payload),{'version':2})
+        data=finance.read_data(self.user)
+        self.assertEqual([(row['month'],row['due_on']) for row in data['card_monthly_totals']],[('2026-11','2026-11-09')])
+        self.assertEqual([(row['month'],row['paid_on']) for row in data['card_monthly_payments']],[('2026-11','2024-01-02')])
+        self.assertEqual(finance.overview(self.user,'2026-10-01','2026-10-31')['cash_position']['balance_minor'],cash)
+        row=finance.overview(self.user,'2026-11-01','2026-11-30')['card_monthly_debt']['cards'][0]
+        self.assertEqual((row['extra_minor'],row['remaining_minor']),('20000','25000'))
+
+    def test_invoice_period_correction_never_overwrites_an_existing_target(self):
+        card=self.card(payment_due_on='2026-11-09')
+        finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2026-11','amount':'350','version':0})
+        with core.connect() as db:db.execute('INSERT INTO card_monthly_totals(user_id,card_ref,month,amount_minor,version,due_on) VALUES(?,?,?,?,1,?)',(self.user,card,'2026-10',30000,'2026-10-09'))
+        with self.assertRaises(finance.Conflict):finance.save_card_monthly_total(self.user,{'card_ref':card,'source_month':'2026-10','month':'2026-11','due_on':'2026-11-09','amount':'300','version':1})
+        self.assertEqual(sorted(row['amount_minor'] for row in finance.read_data(self.user)['card_monthly_totals']),[30000,35000])
 
     def remove(self,kind,record_id):
         data=finance.read_data(self.user)

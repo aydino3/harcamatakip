@@ -228,11 +228,15 @@ def initialize():
         db.execute(f"""CREATE TABLE IF NOT EXISTS card_monthly_totals (
             user_id {integer} NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             card_ref TEXT NOT NULL,month TEXT NOT NULL,amount_minor {integer} NOT NULL CHECK(amount_minor>=0),
-            version {integer} NOT NULL DEFAULT 1,due_on TEXT,PRIMARY KEY(user_id,card_ref,month))""")
+            version {integer} NOT NULL DEFAULT 1,due_on TEXT,due_date_explicit INTEGER NOT NULL DEFAULT 0 CHECK(due_date_explicit IN (0,1)),PRIMARY KEY(user_id,card_ref,month))""")
         if pg:
             db.execute('ALTER TABLE card_monthly_totals ADD COLUMN IF NOT EXISTS due_on TEXT')
         elif 'due_on' not in {row[1] for row in db.execute('PRAGMA table_info(card_monthly_totals)')}:
             db.execute('ALTER TABLE card_monthly_totals ADD COLUMN due_on TEXT')
+        if pg:
+            db.execute('ALTER TABLE card_monthly_totals ADD COLUMN IF NOT EXISTS due_date_explicit INTEGER NOT NULL DEFAULT 0')
+        elif 'due_date_explicit' not in {row[1] for row in db.execute('PRAGMA table_info(card_monthly_totals)')}:
+            db.execute('ALTER TABLE card_monthly_totals ADD COLUMN due_date_explicit INTEGER NOT NULL DEFAULT 0')
         db.execute(f"""CREATE TABLE IF NOT EXISTS card_monthly_payments (
             id {identity} PRIMARY KEY,user_id {integer} NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             card_ref TEXT NOT NULL,month TEXT NOT NULL,amount_minor {integer} NOT NULL CHECK(amount_minor>0),
@@ -677,44 +681,69 @@ def monthly_card_debt(data,month):
     for card in cards:
         ref=card['card_ref'];manual=saved.get(ref);known=[row for row in statements if 'legacy:'+str(row['card_id'])==ref and row['due_on'][:7]==month]
         planned=sum(int(rule['amount_minor']) for rule in data.get('recurring',[]) if rule['status']=='active' and rule.get('card_ref')==ref for _ in payment_dates(rule,first,last))
-        gross=int(manual['amount_minor']) if manual else sum(int(row['total_minor']) for row in known)+planned if known or planned else None
+        gross=int(manual['amount_minor']) if manual else sum(int(row['total_minor']) for row in known)+planned if known else None
         parts=fixed[ref];extra=gross-sum(parts.values()) if gross is not None else None
-        rows.append({'card_ref':ref,'bank_name':card['bank_name'],'display_name':card['display_name'],'version':manual['version'] if manual else 0,'due_on':balances.get((ref,month),{}).get('due_on'),'remaining_minor':str(balances[(ref,month)]['remaining_minor']) if (ref,month) in balances else None,'source':'entered' if manual else 'statement' if known or planned else 'missing','total_minor':str(gross) if gross is not None else None,**{key:str(value) for key,value in parts.items()},'extra_minor':str(extra) if extra is not None and extra>=0 else None,'inconsistent':extra is not None and extra<0})
+        rows.append({'card_ref':ref,'bank_name':card['bank_name'],'display_name':card['display_name'],'version':manual['version'] if manual else 0,'source_month':manual['month'] if manual else month,'configured_due_on':configured_card_due(data,ref),'due_date_explicit':manual.get('due_date_explicit',0) if manual else 0,'due_on':balances.get((ref,month),{}).get('due_on'),'remaining_minor':str(balances[(ref,month)]['remaining_minor']) if (ref,month) in balances else None,'source':'entered' if manual else 'statement' if known else 'missing','total_minor':str(gross) if gross is not None else None,**{key:str(value) for key,value in parts.items()},'extra_minor':str(extra) if extra is not None and extra>=0 else None,'inconsistent':extra is not None and extra<0})
     return {'month':month,'cards':rows,'unassigned_installments':unassigned,'extra_minor':str(sum(int(row['extra_minor']) for row in rows if row['extra_minor'] is not None)),'complete':all(row['total_minor'] is not None and not row['inconsistent'] for row in rows) and not unassigned}
 
 
 def save_card_monthly_total(user_id,payload):
     import profile_settings,re
-    month=payload.get('month','')
-    if not isinstance(month,str) or not re.fullmatch(r'\d{4}-\d{2}',month):raise ValueError('Borç ayını seçin.')
-    date.fromisoformat(month+'-01')
+    month=payload.get('month','');source_month=payload.get('source_month') or month
+    for value in (month,source_month):
+        if not isinstance(value,str) or not re.fullmatch(r'\d{4}-\d{2}',value):raise ValueError('Ödeme ayını seçin.')
+        date.fromisoformat(value+'-01')
     amount=core.money_to_minor(payload.get('amount'))
     if amount<0:raise ValueError('Toplam kart borcu negatif olamaz.')
-    ref=payload.get('card_ref','')
-    version=payload.get('version',0)
+    ref=payload.get('card_ref','');version=payload.get('version',0)
     if isinstance(version,bool) or not isinstance(version,int) or version<0:raise ValueError('Kayıt sürümü geçersiz.')
     with core.LOCK,core.connect() as db:
         _write_lock(db,'users',user_id,user_id)
-        card=profile_settings.resolve_card(db,user_id,ref)
-        ref=card['kind']+':'+str(card['record_id'])
+        card=profile_settings.resolve_card(db,user_id,ref);ref=card['kind']+':'+str(card['record_id'])
         if not card['active']:raise ValueError('Pasif kartın borcunu güncellemeden önce kartı etkinleştirin.')
-        old=db.execute('SELECT amount_minor,version FROM card_monthly_totals WHERE user_id=? AND card_ref=? AND month=?',(user_id,ref,month)).fetchone()
+        if payload.get('due_on'):
+            due=date.fromisoformat(payload['due_on'])
+            if due.isoformat()!=payload['due_on'] or due.isoformat()[:7]!=month:raise ValueError('Son ödeme tarihi ile ödeme ayı aynı dönemde olmalı.')
+            due=due.isoformat()
+        else:due=card_due_for_month(card,month)
+        old=db.execute('SELECT * FROM card_monthly_totals WHERE user_id=? AND card_ref=? AND month=?',(user_id,ref,source_month)).fetchone()
+        target=db.execute('SELECT * FROM card_monthly_totals WHERE user_id=? AND card_ref=? AND month=?',(user_id,ref,month)).fetchone() if source_month!=month else old
+        if source_month!=month and not old:
+            if target and (target['amount_minor'],target['due_on'],target['version'])==(amount,due,version+1):return {'version':target['version']}
+            raise Conflict('Kaydın dönemi değişmiş. Güncel borcu yükleyin.')
+        if source_month!=month and target:raise Conflict('Bu kartın hedef ayda ayrı bir borcu var. İki kayıt kendiliğinden birleştirilmedi.')
         data=read_data(user_id,db)
-        paid=next((row['paid_minor'] for row in monthly_total_balances(data) if row['card_ref']==ref and row['month']==month),0)
+        paid=next((row['paid_minor'] for row in monthly_total_balances(data) if row['card_ref']==ref and row['month']==source_month),0)
         if amount<paid:raise ValueError('Toplam borç, bu ekstre için kaydedilmiş ödemelerden düşük olamaz.')
-        if old and old['amount_minor']==amount:return {'version':old['version']}
+        if old and source_month==month and old['amount_minor']==amount and old['due_on']==due and old['due_date_explicit']:return {'version':old['version']}
         if (old['version'] if old else 0)!=version:raise Conflict('Kart borcu başka bir ekranda değişti. Sayfayı yenileyin.')
-        due=card_due_for_month(card,month)
-        db.execute('INSERT INTO card_monthly_totals(user_id,card_ref,month,amount_minor,version,due_on) VALUES(?,?,?,?,1,?) ON CONFLICT(user_id,card_ref,month) DO UPDATE SET amount_minor=excluded.amount_minor,version=card_monthly_totals.version+1',(user_id,ref,month,amount,due))
-        return {'version':version+1}
+        next_version=version+1
+        if source_month!=month:
+            db.execute('INSERT INTO card_monthly_totals(user_id,card_ref,month,amount_minor,version,due_on,due_date_explicit) VALUES(?,?,?,?,?,?,1)',(user_id,ref,month,amount,next_version,due))
+            db.execute('UPDATE card_monthly_payments SET month=? WHERE user_id=? AND card_ref=? AND month=?',(month,user_id,ref,source_month))
+            db.execute('DELETE FROM card_monthly_totals WHERE user_id=? AND card_ref=? AND month=?',(user_id,ref,source_month))
+        else:
+            db.execute('INSERT INTO card_monthly_totals(user_id,card_ref,month,amount_minor,version,due_on,due_date_explicit) VALUES(?,?,?,?,?,?,1) ON CONFLICT(user_id,card_ref,month) DO UPDATE SET amount_minor=excluded.amount_minor,version=excluded.version,due_on=excluded.due_on,due_date_explicit=1',(user_id,ref,month,amount,next_version,due))
+        return {'version':next_version}
 
 
 def card_due_for_month(card,month):
+    if card.get('payment_due_on'):
+        due=date.fromisoformat(card['payment_due_on'])
+        if due.isoformat()[:7]!=month:raise Conflict(f"Kartın son ödeme tarihi {due:%d.%m.%Y}. Ödeme ayını bu tarihe göre seçin; tarih başka bir aya taşınamaz.")
+        return due.isoformat()
     first=date.fromisoformat(month+'-01')
-    if card.get('payment_due_on'):day=date.fromisoformat(card['payment_due_on']).day
-    elif card.get('due_day'):day=int(card['due_day'])
-    else:raise ValueError('Önce kartın son ödeme tarihini Profil ve Ayarlar bölümünde girin.')
-    return first.replace(day=min(day,calendar.monthrange(first.year,first.month)[1])).isoformat()
+    if not card.get('due_day'):raise ValueError('Önce kartın son ödeme tarihini Profil ve Ayarlar bölümünde girin.')
+    return first.replace(day=min(int(card['due_day']),calendar.monthrange(first.year,first.month)[1])).isoformat()
+
+
+def configured_card_due(data,reference):
+    kind,_,record_id=reference.partition(':')
+    row=next((row for row in data.get('profile_cards',[]) if str(row['legacy_card_id'] if kind=='legacy' else row['id'])==record_id and (kind=='legacy' or row['legacy_card_id'] is None)),None)
+    if row and row['payment_due_on']:return row['payment_due_on']
+    known=[row['due_on'] for row in data.get('statements',[]) if kind=='legacy' and str(row['card_id'])==record_id]
+    future=[value for value in known if value>=today().isoformat()]
+    return min(future) if future else max(known) if known else None
 
 
 def monthly_total_balances(data):
