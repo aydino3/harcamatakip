@@ -317,3 +317,10 @@ For local review of authorized account data, tools/local_review_sandbox.mjs prox
 
 
 The overview defaults to a full calendar month and supports previous/next month navigation. Its income/payment/net cards and event list use that month. A separate general-total section retains the independently selected broader date range. Both views call the same read-only calculation endpoint. Run `node --test tests/monthly_overview.test.cjs` for month-boundary, separate-total, event-lookup, and response-race regressions.
+
+
+### Existing statements and cash position
+
+The simple cash-flow reader now includes legacy card statements as scheduled settlement outflows on their stored due dates. It excludes the purchase-date debit and uses installment occurrence shares instead of the original installment purchase total. Direct and general card repayments reduce remaining statements once; general repayments settle known opening card debt first, then statements in due-date order. Statement payment requests have an owner-scoped idempotency key.
+
+A separate bank/cash position starts from cash_settings, adds received income, and deducts actual cash payments/repayments; expected income and unpaid card purchases do not affect it. Opening funds are never classified as income. The new opening form rejects silent overwrites. User-entered financial data in a local review copy is transferred only after explicit confirmation of the exact records and their accounting meaning.

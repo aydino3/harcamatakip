@@ -117,6 +117,67 @@ class SimpleCashflowTest(unittest.TestCase):
         self.assertEqual(client.post('/api/simple-income',json=payload,headers=headers).status_code,200)
         self.assertEqual(client.post('/api/simple-income',json={**base,'frequency':'yearly'},headers=headers).status_code,400)
 
+    def statement_purchase(self,amount='120',spent='2024-01-05',installments=1):
+        card=core.save_credit_card(self.user,{'bank_name':'Sentetik','display_name':'Ekstre kartı','closing_day':22,'due_day':3})
+        expense=core.save_expense(self.user,{'amount':amount,'spent_on':spent,'description':'Ekstre alışverişi','card_id':card,'installments_count':installments,'first_installment_on':spent})
+        return card,expense
+
+    def test_existing_card_purchase_forecasts_on_statement_due_not_purchase_day(self):
+        card,expense=self.statement_purchase()
+        self.assertEqual(finance.overview(self.user,'2024-01-01','2024-01-31')['net_minor'],'0')
+        result=finance.overview(self.user,'2024-02-01','2024-02-29')
+        self.assertEqual(result['net_minor'],'-12000')
+        self.assertEqual(len(result['events']),1)
+        self.assertEqual(result['events'][0]['date'],'2024-02-03')
+        self.assertEqual(result['events'][0]['card_id'],card)
+
+    def test_statement_partial_payment_is_idempotent_and_does_not_double_count(self):
+        card,expense=self.statement_purchase()
+        statement=finance.overview(self.user,'2024-01-01','2024-03-31')['statements'][0]
+        payload={'statement_id':statement['id'],'amount':'30','paid_on':'2024-02-03','request_key':'statement-payment-0001'}
+        first=finance.record_statement_payment(self.user,payload)
+        self.assertFalse(finance.record_statement_payment(self.user,payload)['created'])
+        result=finance.overview(self.user,'2024-02-01','2024-02-29')
+        self.assertEqual(result['totals']['payments_paid_minor'],'3000')
+        self.assertEqual(result['totals']['payments_planned_minor'],'9000')
+        self.assertEqual(result['net_minor'],'-12000')
+        with self.assertRaises(ValueError):finance.record_statement_payment(self.user,{**payload,'amount':'100','request_key':'statement-payment-0002'})
+        with self.assertRaises(ValueError):finance.record_statement_payment(self.other,{**payload,'request_key':'statement-payment-0003'})
+
+    def test_general_card_payment_reduces_oldest_statement_once(self):
+        card,_=self.statement_purchase()
+        core.record_card_repayment(self.user,card,{'amount':'40','paid_on':'2024-02-02'})
+        result=finance.overview(self.user,'2024-02-01','2024-02-29')
+        self.assertEqual(result['totals']['payments_paid_minor'],'4000')
+        self.assertEqual(result['totals']['payments_planned_minor'],'8000')
+        self.assertEqual(result['net_minor'],'-12000')
+
+    def test_actual_installment_purchase_uses_installment_shares_not_full_purchase(self):
+        self.statement_purchase(amount='120',installments=3)
+        result=finance.overview(self.user,'2024-01-01','2024-06-30')
+        events=[e for e in result['events'] if e.get('statement_id')]
+        self.assertEqual([e['amount_minor'] for e in events],['4000','4000','4000'])
+        self.assertEqual(result['net_minor'],'-12000')
+
+    def test_opening_is_separate_from_income_and_actual_payment_updates_cash(self):
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2024-01-01'})
+        self.assertEqual(finance.save_opening(self.user,{'amount':'500','effective_on':'2024-01-01'}),{'ok':True})
+        with self.assertRaises(finance.Conflict):finance.save_opening(self.user,{'amount':'600','effective_on':'2024-01-01'})
+        plan=self.plan()
+        finance.save_income_once(self.user,{'description':'Alınan gelir','amount':'100','expected_on':'2024-01-02','status':'received','request_key':'opening-income-key-01'})
+        finance.record_payment(self.user,plan,{'scheduled_on':'2024-01-09','paid_on':'2024-01-09','amount':'25','request_key':'opening-paid-key-0001'})
+        result=finance.overview(self.user,'2024-01-01','2024-01-31')
+        self.assertEqual(result['totals']['income_received_minor'],'10000')
+        self.assertEqual(result['cash_position']['balance_minor'],'57500')
+        self.assertEqual(result['net_minor'],'0')
+
+    def test_cash_balance_excludes_future_income_and_unpaid_card_purchases(self):
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2024-01-01'})
+        self.statement_purchase()
+        core.save_income(self.user,{'description':'Beklenen','amount':'200','expected_on':'2024-02-03'})
+        self.assertEqual(finance.cash_position(finance.read_data(self.user),date(2024,1,31))['balance_minor'],'50000')
+        with self.assertRaises(ValueError):finance.save_opening(self.user,{'amount':'-1','effective_on':'2024-01-01'})
+
     def test_explicit_final_payment_is_included_even_if_day_is_earlier_than_first(self):
         self.plan(start_on="2024-12-09",end_on="2025-01-08")
         result=finance.overview(self.user,"2024-12-01","2025-01-31")

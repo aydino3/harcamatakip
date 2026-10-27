@@ -55,6 +55,10 @@ def read_data(user_id):
             ("occurrences","recurring_occurrences","scheduled_on,id"),
             ("adjustments","cash_adjustments","adjustment_on,id"),
             ("payment_events","payment_events","paid_on,id"),
+            ("statements","card_statements","due_on,id"),
+            ("cards","credit_cards","id"),
+            ("installment_plans","installment_plans","id"),
+            ("installment_occurrences","installment_occurrences","due_on,id"),
         ):
             data[key]=[dict(row) for row in db.execute(f"SELECT * FROM {table} WHERE user_id=? ORDER BY {order}",(user_id,)).fetchall()]
         details={row['recurring_id']:dict(row) for row in db.execute('SELECT * FROM payment_plan_details WHERE user_id=?',(user_id,))}
@@ -132,6 +136,9 @@ def calculate(data,start_value,end_value,as_of=None):
             add(f"expense:{row['id']}",row["spent_on"],row["amount_minor"],row["description"],"payment","paid")
     for row in data["repayments"]:
         add(f"repayment:{row['id']}",row["paid_on"],row["amount_minor"],"Kaydedilmiş kart ödemesi","payment","paid")
+    for statement in statement_balances(data):
+        if statement['remaining_minor']:
+            add(f"statement:{statement['id']}",statement['due_on'],statement['remaining_minor'],statement['description'],'payment','overdue' if statement['due_on']<as_of.isoformat() else 'planned',statement_id=statement['id'],card_id=statement['card_id'])
     for index,row in enumerate(data["adjustments"]):
         add(f"adjustment:{index}",row["adjustment_on"],row["amount_minor"],row.get("description","Bakiye düzeltmesi"),"adjustment","completed")
     events.sort(key=lambda row:(row["date"],0 if row["kind"]=="income" else 1,row["id"]))
@@ -160,6 +167,8 @@ def overview(user_id,start_value,end_value):
     result["income_rules"]=data["income_rules"]
     result["income_records"]=data["income_records"]
     result["income_rule_amounts"]=data["income_rule_amounts"]
+    result['cash_position']=cash_position(data)
+    result['statements']=[{**row,**{k:str(row[k]) for k in ('total_minor','paid_minor','remaining_minor')}} for row in statement_balances(data)]
     result["net_minor"]=str(result["net_minor"])
     result["totals"]={key:str(value) for key,value in result["totals"].items()}
     for event in result["events"]:
@@ -193,7 +202,7 @@ def initialize():
         db.execute('CREATE INDEX IF NOT EXISTS payment_details_user_card ON payment_plan_details(user_id,profile_card_id,legacy_card_id)')
         db.execute("CREATE INDEX IF NOT EXISTS payment_events_user_date ON payment_events(user_id,paid_on)")
         db.execute("CREATE INDEX IF NOT EXISTS payment_events_occurrence ON payment_events(user_id,recurring_id,scheduled_on)")
-        for table in ("recurring_expenses","income_records","income_rules"):
+        for table in ("recurring_expenses","income_records","income_rules","card_repayments"):
             if pg:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS client_request_key TEXT")
             elif "client_request_key" not in {row[1] for row in db.execute(f'PRAGMA table_info("{table}")')}:
@@ -442,3 +451,80 @@ def save_monthly_income(user_id,payload):
         rule=db.execute("INSERT INTO income_rules(user_id,description,income_type,category_id,frequency,schedule_mode,start_on,end_on,client_request_key) VALUES(?,?,?,?,?,?,?,?,?)",(user_id,*fields,key)).lastrowid
         db.execute("INSERT INTO income_rule_amounts(user_id,rule_id,effective_on,amount_minor) VALUES(?,?,?,?)",(user_id,rule,first.isoformat(),amount))
         return {"id":rule}
+
+
+def statement_balances(data):
+    """Known statement liabilities, not purchase-date cash outflows. Reads only."""
+    cards={row['id']:row for row in data.get('cards',[])}
+    installment_expenses={row['expense_id'] for row in data.get('installment_plans',[])}
+    linked_expenses={row['expense_id'] for row in data.get('occurrences',[]) if row.get('expense_id') is not None}
+    general={}
+    for payment in data.get('repayments',[]):
+        if payment['statement_id'] is None:general[payment['card_id']]=general.get(payment['card_id'],0)+payment['amount_minor']
+    # A general card payment settles known opening debt first, then oldest statement.
+    for card_id,card in cards.items():general[card_id]=max(0,general.get(card_id,0)-int(card.get('opening_balance_minor',0)))
+    result=[]
+    for statement in sorted(data.get('statements',[]),key=lambda row:(row['due_on'],row['closing_on'],row['id'])):
+        purchase=sum(row['amount_minor'] for row in data.get('expenses',[]) if row['statement_id']==statement['id'] and row['card_id']==statement['card_id'] and row['id'] not in installment_expenses and row['id'] not in linked_expenses)
+        installments=sum(row['amount_minor'] for row in data.get('installment_occurrences',[]) if row['statement_id']==statement['id'] and row['status']!='cancelled')
+        total=purchase+installments
+        direct=sum(row['amount_minor'] for row in data.get('repayments',[]) if row['statement_id']==statement['id'] and row['card_id']==statement['card_id'])
+        remaining=max(0,total-direct)
+        allocated=min(remaining,general.get(statement['card_id'],0));general[statement['card_id']]=general.get(statement['card_id'],0)-allocated
+        card=cards.get(statement['card_id'],{})
+        result.append({'id':statement['id'],'card_id':statement['card_id'],'due_on':statement['due_on'],'total_minor':total,'paid_minor':min(total,direct+allocated),'remaining_minor':remaining-allocated,'description':(card.get('display_name') or 'Kredi kartı')+' · Ekstre ödemesi'})
+    return result
+
+
+def cash_position(data,as_of=None):
+    as_of=(as_of or today()).isoformat()
+    opening=data.get('opening')
+    if not opening or opening['effective_on']>as_of:return {'configured':bool(opening),'balance_minor':None,'as_of':as_of,'effective_on':opening['effective_on'] if opening else None,'opening_balance_minor':str(opening['opening_balance_minor']) if opening else None}
+    effective=opening['effective_on']
+    in_range=lambda value: bool(value) and effective<=value<=as_of
+    received=sum(row['amount_minor'] for row in data['income_records'] if row['status']=='received' and in_range(row['received_on']))
+    expenses={row['id']:row for row in data['expenses']}
+    linked={row['expense_id'] for row in data['occurrences'] if row['expense_id'] in expenses}
+    paid=sum(row['amount_minor'] for row in data['expenses'] if row['id'] not in linked and row['card_id'] is None and in_range(row['spent_on']))
+    paid+=sum(expenses[row['expense_id']]['amount_minor'] for row in data['occurrences'] if row['expense_id'] in expenses and in_range(row['paid_on']))
+    paid+=sum(row['amount_minor'] for row in data.get('payment_events',[]) if in_range(row['paid_on']))
+    paid+=sum(row['amount_minor'] for row in data['repayments'] if in_range(row['paid_on']))
+    adjustments=sum(row['amount_minor'] for row in data['adjustments'] if in_range(row['adjustment_on']))
+    return {'configured':True,'as_of':as_of,'effective_on':effective,'opening_balance_minor':str(opening['opening_balance_minor']),'balance_minor':str(opening['opening_balance_minor']+received-paid+adjustments),'received_minor':str(received),'paid_minor':str(paid)}
+
+
+def save_opening(user_id,payload):
+    amount=core.money_to_minor(payload.get('amount'))
+    effective=date.fromisoformat(payload.get('effective_on',''))
+    if amount<0 or effective>today() or effective.isoformat()!=payload.get('effective_on'):raise ValueError('Başlangıç bakiyesi ve tarihini kontrol edin; gelecek gün seçilemez.')
+    with core.LOCK,core.connect() as db:
+        _write_lock(db,'cash_settings',user_id)
+        old=db.execute('SELECT opening_balance_minor,effective_on FROM cash_settings WHERE user_id=?',(user_id,)).fetchone()
+        if old:
+            if (old['opening_balance_minor'],old['effective_on'])!=(amount,effective.isoformat()):raise Conflict('Başlangıç bakiyesi zaten kayıtlı. Mevcut bakiye sessizce değiştirilemez.')
+        else:db.execute('INSERT INTO cash_settings(user_id,opening_balance_minor,effective_on) VALUES(?,?,?)',(user_id,amount,effective.isoformat()))
+    return {'ok':True}
+
+
+def record_statement_payment(user_id,payload):
+    key=_key(payload)
+    statement_id=core.record_id(payload.get('statement_id'))
+    paid=date.fromisoformat(payload.get('paid_on',''))
+    amount=core.money_to_minor(payload.get('amount'))
+    if not statement_id or amount<=0 or paid>today() or paid.isoformat()!=payload.get('paid_on'):raise ValueError('Ekstre ödeme tarihi ve tutarını kontrol edin.')
+    with core.LOCK,core.connect() as db:
+        _write_lock(db,'card_repayments',user_id)
+        old=db.execute('SELECT * FROM card_repayments WHERE user_id=? AND client_request_key=?',(user_id,key)).fetchone()
+        if old:
+            if (old['statement_id'],old['amount_minor'],old['paid_on'])!=(statement_id,amount,paid.isoformat()):raise Conflict('Aynı ödeme isteği farklı bilgilerle kullanılamaz.')
+            return {'id':old['id'],'created':False}
+        statement=db.execute('SELECT * FROM card_statements WHERE id=? AND user_id=?',(statement_id,user_id)).fetchone()
+        if not statement:raise ValueError('Ekstre hesabınıza ait değil veya bulunamadı.')
+        # Same user lock serializes other writes; avoid opening a second transaction.
+        data={}
+        for key_name,table in (('cards','credit_cards'),('statements','card_statements'),('expenses','expenses'),('repayments','card_repayments'),('installment_plans','installment_plans'),('installment_occurrences','installment_occurrences'),('occurrences','recurring_occurrences')):
+            data[key_name]=[dict(row) for row in db.execute(f'SELECT * FROM {table} WHERE user_id=?',(user_id,))]
+        remaining=next(row['remaining_minor'] for row in statement_balances(data) if row['id']==statement_id)
+        if amount>remaining:raise ValueError('Ödeme ekstrenin kalan tutarını aşıyor.')
+        result=db.execute('INSERT INTO card_repayments(user_id,card_id,statement_id,amount_minor,paid_on,note,client_request_key) VALUES(?,?,?,?,?,?,?)',(user_id,statement['card_id'],statement_id,amount,paid.isoformat(),'Ekstre ödemesi',key))
+        return {'id':result.lastrowid,'created':True}
