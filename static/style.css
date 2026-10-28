@@ -482,3 +482,6 @@ html[data-theme=light] .statement-total small{color:#60728c}html[data-theme=ligh
 html[data-theme=light] .cash-flow-stats>div{background:#edf2fa;border-color:#d0daea}html[data-theme=light] .estimate-value strong{color:#644b93}
 html[data-theme=light] .next-salary{background:#e6f2ed;color:#2f6d5a}html[data-theme=light] .cash-warnings li{background:#edf1f9;color:#405b7c}html[data-theme=light] .cash-warnings .risk-high{background:#faebe6}html[data-theme=light] .cash-warnings .risk-medium{background:#fbf1df}
 @media(prefers-reduced-motion:reduce){.theme-toggle{transition:none}}
+.theme-toggle{min-height:44px;min-width:44px}
+html[data-theme=light] .auth small{color:#61738c}
+html[data-theme=light] .monthly-stats .stat:hover{box-shadow:0 16px 36px #33427318,inset 0 1px 0 #fff}
