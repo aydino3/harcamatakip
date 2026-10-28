@@ -493,3 +493,11 @@ html[data-theme=light] .theme-icon .theme-moon{display:none}
 html[data-theme=light] .theme-icon .theme-sun{display:block}
 .theme-toggle{gap:9px;background:linear-gradient(135deg,#2b3049,#20293f);border-color:#8478ae59;box-shadow:inset 0 1px 0 #ffffff09,0 3px 10px #0000000d}
 html[data-theme=light] .theme-toggle{background:linear-gradient(135deg,#f6f3fd,#eceaf6);border-color:#c5bddb;box-shadow:inset 0 1px 0 #fff,0 3px 10px #41326c06}
+
+/* The statement-month extra total precedes individual cards on both screens. */
+.extra-budget.extra-total-summary{grid-template-columns:minmax(0,1fr);margin:20px 0 16px}
+.extra-total-summary article{border-color:var(--accent);min-width:0}
+.extra-total-summary article>span{font-size:15px;font-weight:650}
+.extra-total-summary strong{font-size:clamp(28px,5vw,40px);letter-spacing:-1px;overflow-wrap:anywhere}
+.extra-budget.extra-budget-details{grid-template-columns:repeat(2,minmax(0,1fr));margin-top:0}
+@media(max-width:600px){.extra-budget.extra-budget-details{grid-template-columns:minmax(0,1fr)}}
