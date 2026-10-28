@@ -12,8 +12,8 @@
     document.querySelectorAll('[data-theme-toggle]').forEach(button=>{
       const label=dark?'Açık temaya geç':'Koyu temaya geç';
       button.setAttribute('aria-label',label);button.setAttribute('title',label);button.setAttribute('aria-pressed',String(dark));
-      const icon=button.querySelector('.theme-icon'),text=button.querySelector('.theme-label');
-      if(icon)icon.textContent=dark?'🌙':'☀️';if(text)text.textContent=dark?'Koyu tema':'Açık tema';
+      const text=button.querySelector('.theme-label');
+      if(text)text.textContent=dark?'Koyu tema':'Açık tema';
     });
   }
   apply();
