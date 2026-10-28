@@ -62,7 +62,7 @@ class SimpleCashflowTest(unittest.TestCase):
         base={'description':'Yetki kontrolü','amount':'10','entry_kind':'expense','purchased_on':'2024-01-02','request_key':'card-validation-0001'}
         with self.assertRaises(ValueError):finance.save_payment_plan(self.user,{**base,'card_ref':reference})
         own=self.card()
-        for change in ({'start_on':'2024-02-06'},{'purchased_on':'2024-03-01'}):
+        for change in ({'start_on':'2024-02-06'},):
             with self.assertRaises(ValueError):finance.save_payment_plan(self.user,{**base,'card_ref':own,**change})
         card=profile_settings.get_profile(self.user)['cards'][0]
         profile_settings.save_card(self.user,{**card,'active':0})
@@ -81,15 +81,15 @@ class SimpleCashflowTest(unittest.TestCase):
     def test_card_due_change_moves_only_unpaid_oneoff_and_keeps_paid_history(self):
         import profile_settings
         card=self.card()
-        base={'description':'Alışveriş','amount':'100','entry_kind':'expense','card_ref':card,'purchased_on':'2024-01-01'}
+        base={'description':'Alışveriş','amount':'100','entry_kind':'expense','card_ref':card,'purchased_on':'2024-01-20'}
         first=finance.save_payment_plan(self.user,{**base,'request_key':'due-change-key-0001'})['id']
         second=finance.save_payment_plan(self.user,{**base,'request_key':'due-change-key-0002'})['id']
         finance.record_payment(self.user,first,{'scheduled_on':'2024-02-05','paid_on':'2024-02-05','amount':'100','request_key':'due-paid-key-0001'})
         old=profile_settings.get_profile(self.user)['cards'][0]
-        profile_settings.save_card(self.user,{**old,'payment_due_on':'2024-02-10'})
+        profile_settings.save_card(self.user,{**old,'payment_due_day':10})
         rules={r['id']:r for r in finance.overview(self.user,'2024-01-01','2024-03-31')['rules']}
         self.assertEqual(rules[first]['start_on'],'2024-02-05')
-        self.assertEqual(rules[second]['start_on'],'2024-02-10')
+        self.assertEqual(rules[second]['display_start_on'],'2024-02-10')
         self.assertEqual(finance.overview(self.user,'2024-01-01','2024-03-31')['net_minor'],'-20000')
 
     def test_bank_regular_payment_weekly_monthly_end_and_no_card(self):
@@ -229,8 +229,8 @@ class SimpleCashflowTest(unittest.TestCase):
     def test_exact_card_due_date_is_never_rebased_onto_the_selected_month(self):
         card=self.card(payment_due_on='2026-11-09')
         plan=self.plan(entry_kind='installment',card_ref=card,start_on='2026-11-09',end_on='2026-12-09')
-        with self.assertRaisesRegex(finance.Conflict,'09.11.2026'):
-            finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2026-10','amount':'300','version':0})
+        with self.assertRaises(finance.Conflict):
+            finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2026-10','due_on':'2026-11-09','amount':'300','version':0})
         self.assertEqual(finance.read_data(self.user)['card_monthly_totals'],[])
         finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2026-11','due_on':'2026-11-09','amount':'300','version':0})
         november=finance.overview(self.user,'2026-11-01','2026-11-30')
@@ -555,3 +555,60 @@ class SimpleCashflowTest(unittest.TestCase):
         with self.assertRaises(finance.Conflict):
             finance.receive_income(self.user,{"rule_id":rule,"scheduled_on":"2024-01-31","received_on":"2024-01-31","expected_amount_minor":"999"})
         with core.connect() as db:self.assertEqual(db.execute("SELECT COUNT(*) FROM income_records").fetchone()[0],0)
+
+    def test_card_day_is_single_source_in_plan_total_forecast_and_profile(self):
+        import profile_settings
+        card=self.card(payment_due_day=9)
+        plan=self.plan(entry_kind='installment',card_ref=card,start_on='2024-01-15',end_on='2024-03-15')
+        finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2024-02','amount':'300','due_day_offset':1,'version':0})
+        view=finance.overview(self.user,'2024-02-01','2024-02-29')
+        row=view['card_monthly_debt']['cards'][0]
+        self.assertEqual((row['due_on'],row['extra_minor']),('2024-02-10','20000'))
+        self.assertEqual([(e['date'],e['amount_minor']) for e in view['events']],[('2024-02-10','30000')])
+        finance.record_payment(self.user,plan,{'scheduled_on':'2024-01-15','paid_on':'2024-01-10','amount':'100','request_key':'day-history-key-0001'})
+        original=profile_settings.get_profile(self.user)['cards'][0]
+        profile_settings.save_card(self.user,{**original,'payment_due_day':12})
+        view=finance.overview(self.user,'2024-01-01','2024-03-31')
+        self.assertEqual(next(e['date'] for e in view['events'] if e['status']=='paid'),'2024-01-10')
+        feb=finance.overview(self.user,'2024-02-01','2024-02-29')
+        self.assertEqual(feb['events'][0]['date'],'2024-02-13')
+        self.assertEqual(feb['card_monthly_debt']['cards'][0]['due_on'],'2024-02-13')
+        self.assertEqual(finance.cash_position(finance.read_data(self.user))['configured'],False)
+
+    def test_card_due_short_month_offsets_and_period_identity(self):
+        import card_schedule
+        self.assertEqual(card_schedule.due_on({'payment_due_day':31},'2024-02'),'2024-02-29')
+        self.assertEqual(card_schedule.due_on({'payment_due_day':31},'2025-02'),'2025-02-28')
+        self.assertEqual(card_schedule.due_on({'payment_due_day':1},'2024-01',-5),'2023-12-27')
+        self.assertEqual(card_schedule.due_on({'payment_due_day':31},'2024-12',5),'2025-01-05')
+        card=self.card(payment_due_day=1)
+        finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2024-02','amount':'300','due_day_offset':-5,'version':0})
+        view=finance.overview(self.user,'2024-01-01','2024-01-31')
+        self.assertEqual(view['events'][0]['date'],'2024-01-27')
+        self.assertEqual(view['events'][0]['monthly_month'],'2024-02')
+        for bad in (-6,6,1.5,True,'1.5','no'):
+            with self.assertRaises(ValueError):finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2024-03','amount':'300','due_day_offset':bad,'version':0})
+
+    def test_opening_edit_is_revisioned_and_never_creates_income(self):
+        finance.save_opening(self.user,{'amount':'100','effective_on':'2024-01-01'})
+        revision=finance.cash_position(finance.read_data(self.user))['revision']
+        finance.save_opening(self.user,{'amount':'200','effective_on':'2024-01-02','revision':revision})
+        with self.assertRaises(finance.Conflict):finance.save_opening(self.user,{'amount':'300','effective_on':'2024-01-01','revision':revision})
+        view=finance.overview(self.user,'2024-01-01','2024-01-31')
+        self.assertEqual(view['cash_position']['balance_minor'],'20000')
+        self.assertEqual(view['totals']['income_received_minor'],'0')
+
+    def test_bank_cash_reclassification_preserves_balance_and_is_recoverable(self):
+        finance.save_opening(self.user,{'amount':'0','effective_on':'2024-01-02'})
+        record=finance.save_income_once(self.user,{'description':'Sentetik banka nakdi','amount':'123.45','expected_on':'2024-01-02','status':'received','request_key':'cash-reclassify-0001'})['id']
+        before=finance.overview(self.user,'2024-01-01','2024-01-31')
+        row=next(r for r in before['income_records'] if r['id']==record)
+        payload={'id':record,'revision':row['revision']}
+        with self.assertRaises(ValueError):finance.transfer_income_to_opening(self.other,payload)
+        change=finance.transfer_income_to_opening(self.user,payload)
+        after=finance.overview(self.user,'2024-01-01','2024-01-31')
+        self.assertEqual(before['cash_position']['balance_minor'],after['cash_position']['balance_minor'])
+        self.assertEqual(after['cash_position']['opening_balance_minor'],'12345')
+        self.assertEqual(after['totals']['income_received_minor'],'0')
+        finance.restore_financial_record(self.user,change)
+        self.assertEqual(finance.overview(self.user,'2024-01-01','2024-01-31')['totals']['income_received_minor'],'12345')

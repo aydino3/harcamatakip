@@ -4,7 +4,7 @@ import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {randomBytes} from 'node:crypto';
 
-export async function start(snapshot,root,python,reviewUrl){
+export async function start(snapshot,root,python,reviewUrl,port=0){
  const expected=snapshot.recurring.map(row=>row.id).sort((a,b)=>a-b).join(',');
  const csrf=randomBytes(32).toString('hex'),cache=new Map();
  const child=spawn(python,['tools/local_review_sandbox.py'],{cwd:root,env:{PATH:process.env.PATH||'/usr/bin:/bin',...(process.env.LD_LIBRARY_PATH?{LD_LIBRARY_PATH:process.env.LD_LIBRARY_PATH}:{}),APP_ENV:'development',PRIVATE_BETA:'0',LANG:'en_US.UTF-8'}});
@@ -43,6 +43,6 @@ export async function start(snapshot,root,python,reviewUrl){
    res.writeHead(response.status,{'Content-Type':'application/json; charset=utf-8'});res.end(await response.text());
   }catch{return json(503,{error:'Yerel çalışma kopyası yüklenemedi. Oturumunu kontrol et.'})}
  });
- await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve)});
+ await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve)});
  return {url:'http://localhost:'+server.address().port,close:()=>{server.close();child.kill()}};
 }

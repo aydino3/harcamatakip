@@ -28,10 +28,10 @@ class ProfileSettingsTest(unittest.TestCase):
         card=core.save_credit_card(self.user,{'bank_name':'Sentetik banka','display_name':'Eski kart','closing_day':22,'due_day':3})
         first=profiles.get_profile(self.user)['cards'][0]
         self.assertEqual(first['id'],f'legacy:{card}')
-        self.assertIsNone(first['payment_due_on'])
-        profiles.save_card(self.user,{**first,'payment_due_on':'2027-05-09'})
+        self.assertEqual(first['payment_due_day'],3)
+        profiles.save_card(self.user,{**first,'payment_due_day':9})
         changed=profiles.get_profile(self.user)['cards'][0]
-        self.assertEqual(changed['payment_due_on'],'2027-05-09')
+        self.assertEqual(changed['payment_due_day'],9)
         with core.connect() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM expenses').fetchone()[0],0)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM payment_events').fetchone()[0],0)
@@ -55,8 +55,8 @@ class ProfileSettingsTest(unittest.TestCase):
             with self.assertRaises(ValueError):profiles.save_card(self.user,{**payload,**changes})
         profiles.save_card(self.user,payload)
         card=profiles.get_profile(self.user)['cards'][0]
-        profiles.save_card(self.user,{**card,'payment_due_on':'2027-05-09'})
-        with self.assertRaises(ValueError):profiles.save_card(self.user,{**card,'payment_due_on':'2027-05-10'})
+        profiles.save_card(self.user,{**card,'payment_due_day':9})
+        with self.assertRaises(ValueError):profiles.save_card(self.user,{**card,'payment_due_day':10})
 
     def test_profile_api_requires_login_and_csrf(self):
         client=webapp.create_app({'TESTING':True,'PRIVATE_BETA':False}).test_client()
@@ -79,4 +79,5 @@ class ProfileSettingsTest(unittest.TestCase):
         card=core.save_credit_card(self.user,{'bank_name':'Sentetik','display_name':'Ekstreli kart','closing_day':22,'due_day':3})
         with core.connect() as db:
             db.execute('INSERT INTO card_statements(user_id,card_id,period_start,closing_on,due_on) VALUES(?,?,?,?,?)',(self.user,card,'2027-04-01','2027-04-22','2027-05-03'))
-        self.assertEqual(profiles.get_profile(self.user)['cards'][0]['payment_due_on'],'2027-05-03')
+        self.assertEqual(profiles.get_profile(self.user)['cards'][0]['payment_due_day'],3)
+        with core.connect() as db:self.assertEqual(db.execute('SELECT due_on FROM card_statements WHERE user_id=?',(self.user,)).fetchone()[0],'2027-05-03')

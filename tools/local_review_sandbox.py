@@ -10,7 +10,12 @@ def run():
         os.environ.pop(key,None)
     os.environ['APP_ENV']='development';os.environ['PRIVATE_BETA']='0'
     os.umask(0o077)
-    folder=Path(tempfile.mkdtemp(prefix='finance-private-review-'))
+    resume=snapshot.get('resume_local_db')
+    if resume:
+        database=Path(resume).resolve()
+        if database.name!='review.sqlite3' or database.parent.parent!=Path('/tmp').resolve() or not database.parent.name.startswith('finance-private-review-'):raise ValueError('Geçersiz yerel kopya.')
+        folder=database.parent
+    else:folder=Path(tempfile.mkdtemp(prefix='finance-private-review-'))
     os.chmod(folder,0o700)
     os.environ['EXPENSE_DB_PATH']=str(folder/'review.sqlite3')
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -19,39 +24,51 @@ def run():
     import profile_settings as profiles
     from webapp import create_app
     web=create_app()
-    user=core.create_user(snapshot['profile']['email'],secrets.token_urlsafe(48))
-    with core.connect() as db:
-        # Remove only defaults just created in this new, empty local test account.
-        db.execute('DELETE FROM categories WHERE user_id=?',(user,))
-        db.execute('DELETE FROM payment_methods WHERE user_id=?',(user,))
-        db.execute('UPDATE users SET display_name=? WHERE id=?',(snapshot['profile']['display_name'],user))
-        sequence=(('categories','categories'),('payment_methods','payment_methods'),('credit_cards','credit_cards'),('profile_cards','profile_cards'),('statements','card_statements'),('recurring','recurring_expenses'),('income_rules','income_rules'),('income_rule_amounts','income_rule_amounts'),('income_records','income_records'),('expenses','expenses'),('occurrences','recurring_occurrences'),('repayments','card_repayments'),('adjustments','cash_adjustments'),('opening','cash_settings'),('installment_plans','installment_plans'),('installment_occurrences','installment_occurrences'),('payment_plan_details','payment_plan_details'),('payment_events','payment_events'),('card_monthly_totals','card_monthly_totals'),('card_monthly_payments','card_monthly_payments'),('financial_record_deletions','financial_record_deletions'))
-        for key,table in sequence:
-            columns={row[1] for row in db.execute(f'PRAGMA table_info({table})')}
-            rows=snapshot.get(key,[])
-            if isinstance(rows,dict):rows=[rows]
-            for source in rows:
-                row={name:value for name,value in source.items() if name in columns and name!='user_id'}
-                row['user_id']=user
-                names=list(row)
-                db.execute(f"INSERT INTO {table} ({','.join(names)}) VALUES({','.join('?' for _ in names)})",tuple(row[name] for name in names))
-        for card in snapshot.get('credit_cards',[]):
-            due=snapshot['profile'].get('known_due_dates',{}).get(str(card['id']))
-            if due and not db.execute('SELECT 1 FROM profile_cards WHERE user_id=? AND legacy_card_id=?',(user,card['id'])).fetchone():
-                db.execute('INSERT INTO profile_cards(user_id,legacy_card_id,bank_name,display_name,last_four,payment_due_on,active) VALUES(?,?,?,?,?,?,?)',(user,card['id'],card['bank_name'],card['display_name'],card.get('last_four',''),due,card['active']))
-        if db.execute('PRAGMA foreign_key_check').fetchall():raise ValueError('Yerel kopyanın ilişki kontrolü başarısız.')
-    # Before enabling edits, verify the seeded financial view equals the source snapshot.
-    original={**snapshot,'cards':snapshot.get('credit_cards',[]),'opening':(snapshot.get('opening') or [None])[0],'payment_events':snapshot.get('payment_events',[])}
-    for key in ('installment_plans','installment_occurrences','profile_cards','card_monthly_totals','card_monthly_payments'):original.setdefault(key,[])
-    details={row['recurring_id']:row for row in snapshot.get('payment_plan_details',[])}
-    original['recurring']=[{**row,**finance._detail_fields(details.get(row['id']),finance.legacy_entry_kind(row,snapshot.get('payment_methods',[])))} for row in snapshot['recurring']]
-    original=finance._visible_records(original,user)
-    for start,end in (('2026-01-01','2027-12-31'),):
-        source=finance.calculate(original,start,end)
-        copy=finance.calculate(finance.read_data(user),start,end)
-        if source['totals']!=copy['totals'] or source['net_minor']!=copy['net_minor'] or len(source['events'])!=len(copy['events']):raise ValueError('Yerel finansal kopya kaynakla uzlaşmadı.')
-    for correction in snapshot.get('preview_period_corrections',[]):
-        finance.save_card_monthly_total(user,correction)
+    if not resume:
+        user=core.create_user(snapshot['profile']['email'],secrets.token_urlsafe(48))
+        with core.connect() as db:
+            # Remove only defaults just created in this new, empty local test account.
+            db.execute('DELETE FROM categories WHERE user_id=?',(user,))
+            db.execute('DELETE FROM payment_methods WHERE user_id=?',(user,))
+            db.execute('UPDATE users SET display_name=? WHERE id=?',(snapshot['profile']['display_name'],user))
+            sequence=(('categories','categories'),('payment_methods','payment_methods'),('credit_cards','credit_cards'),('profile_cards','profile_cards'),('statements','card_statements'),('recurring','recurring_expenses'),('income_rules','income_rules'),('income_rule_amounts','income_rule_amounts'),('income_records','income_records'),('expenses','expenses'),('occurrences','recurring_occurrences'),('repayments','card_repayments'),('adjustments','cash_adjustments'),('opening','cash_settings'),('installment_plans','installment_plans'),('installment_occurrences','installment_occurrences'),('payment_plan_details','payment_plan_details'),('payment_events','payment_events'),('card_monthly_totals','card_monthly_totals'),('card_monthly_payments','card_monthly_payments'),('financial_record_deletions','financial_record_deletions'))
+            for key,table in sequence:
+                columns={row[1] for row in db.execute(f'PRAGMA table_info({table})')}
+                rows=snapshot.get(key,[])
+                if isinstance(rows,dict):rows=[rows]
+                for source in rows:
+                    row={name:value for name,value in source.items() if name in columns and name!='user_id'}
+                    row['user_id']=user
+                    names=list(row)
+                    db.execute(f"INSERT INTO {table} ({','.join(names)}) VALUES({','.join('?' for _ in names)})",tuple(row[name] for name in names))
+            for card in snapshot.get('credit_cards',[]):
+                due=snapshot['profile'].get('known_due_dates',{}).get(str(card['id']))
+                if due and not db.execute('SELECT 1 FROM profile_cards WHERE user_id=? AND legacy_card_id=?',(user,card['id'])).fetchone():
+                    db.execute('INSERT INTO profile_cards(user_id,legacy_card_id,bank_name,display_name,last_four,payment_due_on,active) VALUES(?,?,?,?,?,?,?)',(user,card['id'],card['bank_name'],card['display_name'],card.get('last_four',''),due,card['active']))
+            if db.execute('PRAGMA foreign_key_check').fetchall():raise ValueError('Yerel kopyanın ilişki kontrolü başarısız.')
+        # Before enabling edits, verify the seeded financial view equals the source snapshot.
+        original={**snapshot,'cards':snapshot.get('credit_cards',[]),'opening':(snapshot.get('opening') or [None])[0],'payment_events':snapshot.get('payment_events',[])}
+        for key in ('installment_plans','installment_occurrences','profile_cards','card_monthly_totals','card_monthly_payments'):original.setdefault(key,[])
+        details={row['recurring_id']:row for row in snapshot.get('payment_plan_details',[])}
+        original['recurring']=[{**row,**finance._detail_fields(details.get(row['id']),finance.legacy_entry_kind(row,snapshot.get('payment_methods',[])))} for row in snapshot['recurring']]
+        original=finance._visible_records(original,user)
+        for start,end in (('2026-01-01','2027-12-31'),):
+            source=finance.calculate(original,start,end)
+            copy=finance.calculate(finance.read_data(user),start,end)
+            if source['totals']!=copy['totals'] or source['net_minor']!=copy['net_minor'] or len(source['events'])!=len(copy['events']):raise ValueError('Yerel finansal kopya kaynakla uzlaşmadı.')
+        for correction in snapshot.get('preview_period_corrections',[]):
+            finance.save_card_monthly_total(user,correction)
+    else:
+        with core.connect() as db:
+            owned=db.execute('SELECT id FROM users WHERE email=?',(snapshot['profile']['email'],)).fetchone()
+            if not owned:raise ValueError('Yerel kopya hesaba ait değil.')
+            user=owned['id']
+    if snapshot.get('preview_opening_transfer'):
+        record_id=snapshot['preview_opening_transfer']['id']
+        records=finance.overview(user,'2026-01-01','2027-12-31')['income_records']
+        row=next((row for row in records if row['id']==record_id),None)
+        if not row:raise ValueError('Başlangıç bakiyesine taşınacak kayıt bulunamadı.')
+        finance.transfer_income_to_opening(user,{'id':row['id'],'revision':row['revision']})
     del snapshot
     token,csrf=core.create_session(user)
     @web.after_request

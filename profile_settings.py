@@ -2,6 +2,7 @@
 from datetime import date
 from simple_cashflow import today
 import re
+import card_schedule
 import app as core
 
 
@@ -21,6 +22,10 @@ def initialize():
             version INTEGER NOT NULL DEFAULT 1 CHECK(version>0),
             UNIQUE(id,user_id),UNIQUE(user_id,legacy_card_id),UNIQUE(user_id,bank_name,display_name,last_four),
             FOREIGN KEY(legacy_card_id,user_id) REFERENCES credit_cards(id,user_id))""")
+        if pg:
+            db.execute('ALTER TABLE profile_cards ADD COLUMN IF NOT EXISTS payment_due_day INTEGER CHECK(payment_due_day BETWEEN 1 AND 31)')
+        elif 'payment_due_day' not in {row[1] for row in db.execute('PRAGMA table_info(profile_cards)')}:
+            db.execute('ALTER TABLE profile_cards ADD COLUMN payment_due_day INTEGER CHECK(payment_due_day BETWEEN 1 AND 31)')
         db.execute('CREATE UNIQUE INDEX IF NOT EXISTS profile_cards_id_owner ON profile_cards(id,user_id)')
         if pg:
             db.execute('ALTER TABLE profile_cards ENABLE ROW LEVEL SECURITY')
@@ -47,6 +52,10 @@ def get_profile(user_id):
     for row in settings:
         if row['legacy_card_id'] is None:
             cards.append({'id':f"card:{row['id']}",**{key:row[key] for key in ('bank_name','display_name','last_four','active','payment_due_on','version')},'monthly_due_day':None})
+    for card in cards:
+        setting=next((row for row in settings if (row['legacy_card_id']==int(card['id'].split(':')[1]) if card['id'].startswith('legacy:') else row['id']==int(card['id'].split(':')[1]))),None)
+        card['payment_due_day']=card_schedule.due_day({**card,**({'payment_due_day':setting.get('payment_due_day')} if setting else {})})
+        card['payment_due_on']=card_schedule.next_due(card,today())
     return {'id':user['id'],'email':user['email'],'display_name':user['display_name'] or user['email'].split('@')[0],'cards':cards}
 
 
@@ -63,12 +72,15 @@ def save_card(user_id,payload):
     bank,name,last=payload.get('bank_name',''),payload.get('display_name',''),payload.get('last_four','')
     if not isinstance(bank,str) or not isinstance(name,str) or not isinstance(last,str) or not 1<=len(bank.strip())<=80 or not 1<=len(name.strip())<=80 or last and (len(last)!=4 or not last.isascii() or not last.isdigit()):
         raise ValueError('Banka, kart adı ve varsa son dört haneyi kontrol edin.')
-    due=payload.get('payment_due_on') or None
-    if not due:raise ValueError('Kartın son ödeme tarihini girin.')
-    if due:
-        try:
-            if date.fromisoformat(due).isoformat()!=due:raise ValueError
-        except (ValueError,TypeError):raise ValueError('Son ödeme tarihi geçerli bir gün olmalı.') from None
+    day_value=payload.get('payment_due_day')
+    if day_value is not None:
+        if isinstance(day_value,str) and day_value.isascii() and day_value.isdigit():day_value=int(day_value)
+        day_value=card_schedule.due_day({'payment_due_day':day_value})
+        due=card_schedule.next_due({'payment_due_day':day_value},today())
+    else:
+        due=payload.get('payment_due_on') or None
+        if not due or date.fromisoformat(due).isoformat()!=due:raise ValueError('Kartın son ödeme gününü girin.')
+        day_value=card_schedule.due_day({'payment_due_on':due})
     active=payload.get('active',1)
     if not isinstance(active,(int,bool)) or active not in (0,1,False,True):raise ValueError('Kart durumunu kontrol edin.')
     reference=payload.get('id') or None
@@ -99,11 +111,11 @@ def save_card(user_id,payload):
         version=old['version'] if old else 0
         if old:
             before=(legacy['bank_name'],legacy['display_name'],legacy['last_four'],old['payment_due_on'],legacy['active']) if kind=='legacy' else tuple(old[field] for field in ('bank_name','display_name','last_four','payment_due_on','active'))
-            if before==values:return {'id':reference}
+            if before==values and old['payment_due_day']==day_value:return {'id':reference}
         if reference and (isinstance(payload.get('version'),bool) or not isinstance(payload.get('version'),int) or payload.get('version')!=version):
             raise ValueError('Kart bilgisi değişti. Güncel bilgileri yükleyip yeniden düzenleyin.')
         if reference:
-            _move_unpaid_expenses(db,user_id,kind,record_id,due)
+            pass  # Due dates are derived centrally; actual payment keys never move.
         if old:
             db.execute('UPDATE profile_cards SET bank_name=?,display_name=?,last_four=?,payment_due_on=?,active=?,version=version+1 WHERE id=? AND user_id=?',(*values,old['id'],user_id))
         else:
@@ -114,6 +126,7 @@ def save_card(user_id,payload):
                 return {'id':f"card:{prior['id']}"}
             new=db.execute('INSERT INTO profile_cards(user_id,legacy_card_id,bank_name,display_name,last_four,payment_due_on,active) VALUES(?,?,?,?,?,?,?)',(user_id,record_id if kind=='legacy' else None,*values)).lastrowid
             if not reference:reference=f'card:{new}'
+        db.execute('UPDATE profile_cards SET payment_due_day=? WHERE user_id=? AND '+('legacy_card_id=?' if kind=='legacy' else 'id=?'),(day_value,user_id,record_id if kind=='legacy' else old['id'] if old else new))
         if kind=='legacy':
             db.execute('UPDATE credit_cards SET bank_name=?,display_name=?,last_four=?,active=? WHERE id=? AND user_id=?',(bank.strip(),name.strip(),last,int(active),record_id,user_id))
         return {'id':reference}
@@ -124,7 +137,7 @@ def resolve_card(db,user_id,reference):
     if not match:raise ValueError('Kart bulunamadı.')
     kind,raw=match.groups();record_id=core.record_id(raw)
     if kind=='legacy':
-        row=db.execute('SELECT c.*,p.payment_due_on FROM credit_cards c LEFT JOIN profile_cards p ON p.legacy_card_id=c.id AND p.user_id=c.user_id WHERE c.id=? AND c.user_id=?',(record_id,user_id)).fetchone()
+        row=db.execute('SELECT c.*,p.payment_due_on,p.payment_due_day FROM credit_cards c LEFT JOIN profile_cards p ON p.legacy_card_id=c.id AND p.user_id=c.user_id WHERE c.id=? AND c.user_id=?',(record_id,user_id)).fetchone()
         if row:
             result=dict(row)
             if not result['payment_due_on']:
