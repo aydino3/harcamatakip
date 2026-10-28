@@ -630,3 +630,84 @@ class SimpleCashflowTest(unittest.TestCase):
         self.assertEqual((row['due_on'],row['due_day_offset']),('2026-11-27',1))
         finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2026-11','amount':'300','due_day_offset':0,'version':1})
         self.assertEqual(finance.overview(self.user,'2026-11-01','2026-11-30')['card_monthly_debt']['cards'][0]['due_on'],'2026-11-26')
+
+    def test_opening_day_correction_includes_existing_payment_without_reposting(self):
+        card=self.card(payment_due_day=26)
+        finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2024-10','amount':'5379.01','version':0})
+        finance.record_card_monthly_payment(self.user,{'card_ref':card,'month':'2024-10','amount':'5379.01','paid_on':'2024-10-26','request_key':'cash-boundary-payment01'})
+        finance.save_opening(self.user,{'amount':'30620','effective_on':'2024-10-27'})
+        before=finance.cash_position(finance.read_data(self.user),date(2024,10,27))
+        self.assertEqual(before['balance_minor'],'3062000')
+        finance.save_opening(self.user,{'amount':'30620','effective_on':'2024-10-26','revision':before['revision']})
+        for _ in range(2):self.assertEqual(finance.cash_position(finance.read_data(self.user),date(2024,10,27))['balance_minor'],'2524099')
+        with core.connect() as db:
+            rows=db.execute('SELECT amount_minor,paid_on FROM card_monthly_payments WHERE user_id=?',(self.user,)).fetchall()
+            self.assertEqual([(r[0],r[1]) for r in rows],[(537901,'2024-10-26')])
+
+    def test_scheduled_once_income_credits_on_date_and_confirmation_does_not_duplicate(self):
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2024-01-01','auto_income_on_due':True})
+        record=finance.save_income_once(self.user,{'description':'Tarihli gelir','amount':'100','expected_on':'2024-01-03','status':'expected','request_key':'auto-income-once-0001'})['id']
+        self.assertEqual(finance.cash_position(finance.read_data(self.user),date(2024,1,2))['balance_minor'],'50000')
+        for when in (date(2024,1,3),date(2024,1,4)):
+            position=finance.cash_position(finance.read_data(self.user),when)
+            self.assertEqual((position['balance_minor'],position['automatic_income_minor']),('60000','10000'))
+        finance.receive_income(self.user,{'record_id':record,'received_on':'2024-01-03','expected_amount_minor':'10000'})
+        finance.receive_income(self.user,{'record_id':record,'received_on':'2024-01-03','expected_amount_minor':'10000'})
+        position=finance.cash_position(finance.read_data(self.user),date(2024,1,4))
+        self.assertEqual((position['balance_minor'],position['automatic_income_minor']),('60000','0'))
+
+    def test_scheduled_income_monthly_weekly_and_projection_share_recognition(self):
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2024-01-01','auto_income_on_due':1})
+        monthly=finance.save_monthly_income(self.user,{'description':'Aylık tarihli','amount':'100','frequency':'monthly','schedule_mode':'last_day','start_month':'2024-01','request_key':'auto-monthly-key-0001'})['id']
+        finance.save_monthly_income(self.user,{'description':'Haftalık tarihli','amount':'10','frequency':'weekly','expected_on':'2024-01-02','request_key':'auto-weekly-key-0001'})
+        data=finance.read_data(self.user)
+        self.assertEqual(finance.cash_position(data,date(2024,1,31))['balance_minor'],'65000')
+        self.assertEqual(finance.cash_position(data,date(2024,2,29))['balance_minor'],'79000')
+        self.assertEqual(finance.projected_balance(data,'2024-02-29',date(2024,1,31)),79000)
+        finance.receive_income(self.user,{'rule_id':monthly,'scheduled_on':'2024-01-31','received_on':'2024-01-31','expected_amount_minor':'10000'})
+        self.assertEqual(finance.cash_position(finance.read_data(self.user),date(2024,2,29))['balance_minor'],'79000')
+
+    def test_actual_receipt_date_overrides_scheduled_date_without_phantom_cash(self):
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2024-01-01','auto_income_on_due':1})
+        record=finance.save_income_once(self.user,{'description':'Geciken gerçek gelir','amount':'100','expected_on':'2024-01-03','status':'expected','request_key':'auto-late-key-000001'})['id']
+        finance.receive_income(self.user,{'record_id':record,'received_on':'2024-01-05','expected_amount_minor':'10000'})
+        data=finance.read_data(self.user)
+        self.assertEqual(finance.cash_position(data,date(2024,1,4))['balance_minor'],'50000')
+        self.assertEqual(finance.cash_position(data,date(2024,1,5))['balance_minor'],'60000')
+
+    def test_deleting_scheduled_receipt_suppresses_virtual_regeneration(self):
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2024-01-01','auto_income_on_due':1})
+        rule=finance.save_monthly_income(self.user,{'description':'Tekrarlı tarihli','amount':'100','frequency':'monthly','expected_on':'2024-01-02','request_key':'auto-delete-rule-001'})['id']
+        receipt=finance.receive_income(self.user,{'rule_id':rule,'scheduled_on':'2024-01-02','received_on':'2024-01-02','expected_amount_minor':'10000'})['id']
+        data=finance.read_data(self.user)
+        removed=finance.delete_financial_record(self.user,{'record_kind':'income_record','id':receipt,'revision':finance.managed_revision(data,'income_record',receipt),'confirmation':'SİL'})
+        self.assertEqual(finance.cash_position(finance.read_data(self.user),date(2024,1,31))['balance_minor'],'50000')
+        finance.restore_financial_record(self.user,removed)
+        self.assertEqual(finance.cash_position(finance.read_data(self.user),date(2024,1,31))['balance_minor'],'60000')
+
+    def test_paused_materialized_plan_does_not_auto_credit_but_actual_income_stays(self):
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2024-01-01','auto_income_on_due':1})
+        rule=core.save_income_rule(self.user,{'description':'Duraklatılan','amount':'100','frequency':'monthly','start_on':'2024-01-02','schedule_mode':'anchored'})
+        with core.connect() as db:
+            record=db.execute("INSERT INTO income_records(user_id,rule_id,income_type,description,amount_minor,expected_on,status) VALUES(?,?,'other','Duraklatılan',10000,'2024-01-02','expected')",(self.user,rule)).lastrowid
+        core.set_income_rule_status(self.user,rule,'paused')
+        self.assertEqual(finance.cash_position(finance.read_data(self.user),date(2024,1,31))['balance_minor'],'50000')
+        with core.connect() as db:db.execute("UPDATE income_records SET status='received',received_on='2024-01-02' WHERE id=? AND user_id=?",(record,self.user))
+        self.assertEqual(finance.cash_position(finance.read_data(self.user),date(2024,1,31))['balance_minor'],'60000')
+
+    def test_auto_income_is_opt_in_owned_and_revision_protected(self):
+        for user in (self.user,self.other):
+            finance.save_opening(user,{'amount':'500','effective_on':'2024-01-01'})
+            finance.save_income_once(user,{'description':'Planlı','amount':'100','expected_on':'2024-01-02','status':'expected','request_key':'auto-owned-key-00001'})
+        original=finance.cash_position(finance.read_data(self.user),date(2024,1,3))
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2024-01-01','auto_income_on_due':1,'revision':original['revision']})
+        with self.assertRaises(finance.Conflict):finance.save_opening(self.user,{'amount':'500','effective_on':'2024-01-01','auto_income_on_due':0,'revision':original['revision']})
+        self.assertEqual(finance.cash_position(finance.read_data(self.user),date(2024,1,3))['balance_minor'],'60000')
+        self.assertEqual(finance.cash_position(finance.read_data(self.other),date(2024,1,3))['balance_minor'],'50000')
+
+    def test_auto_income_before_opening_is_not_added_again(self):
+        finance.save_monthly_income(self.user,{'description':'Eski başlangıçlı','amount':'100','frequency':'monthly','expected_on':'2000-01-02','request_key':'auto-long-history-01'})
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2024-01-01','auto_income_on_due':1})
+        data=finance.read_data(self.user)
+        self.assertEqual(finance.cash_position(data,date(2024,1,3))['balance_minor'],'60000')
+        self.assertEqual(finance.projected_balance(data,'2024-01-31',date(2024,1,3)),60000)

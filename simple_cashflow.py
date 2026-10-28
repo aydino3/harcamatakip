@@ -72,20 +72,18 @@ def read_data(user_id,connection=None):
             extra=details.get(rule['id'],{})
             fallback=legacy_entry_kind(rule,data['payment_methods'])
             rule.update(entry_kind=extra.get('entry_kind',fallback),purchased_on=extra.get('purchased_on'),card_ref=('legacy:'+str(extra['legacy_card_id'])) if extra.get('legacy_card_id') else ('card:'+str(extra['profile_card_id'])) if extra.get('profile_card_id') else '')
-        opening=db.execute("SELECT opening_balance_minor,effective_on FROM cash_settings WHERE user_id=?",(user_id,)).fetchone()
+        opening=db.execute("SELECT opening_balance_minor,effective_on,auto_income_on_due FROM cash_settings WHERE user_id=?",(user_id,)).fetchone()
         data["opening"]=dict(opening) if opening else None
     return _visible_records(data,user_id,connection)
 
 
-def calculate(data,start_value,end_value,as_of=None):
-    as_of=as_of or today()
+def income_events(data,start_value,end_value,as_of):
     start,end=date.fromisoformat(start_value),date.fromisoformat(end_value)
-    if start.isoformat()!=start_value or end.isoformat()!=end_value or end<start or (end-start).days>3660:
-        raise ValueError("Tarih aralığını kontrol edin; en fazla 10 yıl seçilebilir.")
     events=[]
     def add(key,when,amount,description,kind,status,**extra):
         if start_value<=when<=end_value:
             events.append({"id":key,"date":when,"amount_minor":int(amount),"description":description,"kind":kind,"status":status,**extra})
+    automatic=bool((data.get('opening') or {}).get('auto_income_on_due'))
     actual_income_keys=set(tuple(key) for key in data.get('suppressed_income_keys',[]))
     rules={row["id"]:row for row in data["income_rules"]}
     for row in data["income_records"]:
@@ -96,7 +94,8 @@ def calculate(data,start_value,end_value,as_of=None):
                 actual_income_keys.add((row["rule_id"],row["expected_on"]))
             add(f"income:{row['id']}",row["received_on"],row["amount_minor"],row["description"],"income","received",record_id=row["id"],expected_on=row["expected_on"])
         elif row["status"]=="expected":
-            add(f"income:{row['id']}",row["expected_on"],row["amount_minor"],row["description"],"income","overdue" if row["expected_on"]<as_of.isoformat() else "expected",record_id=row["id"])
+            if row["rule_id"] is not None and rules.get(row["rule_id"],{}).get("status")!="active":continue
+            add(f"income:{row['id']}",row["expected_on"],row["amount_minor"],row["description"],"income","received" if automatic and row["expected_on"]<=as_of.isoformat() else "overdue" if row["expected_on"]<as_of.isoformat() else "expected",record_id=row["id"],auto_received=automatic and row["expected_on"]<=as_of.isoformat())
     for rule in rules.values():
         if rule["status"]!="active":
             continue
@@ -112,8 +111,21 @@ def calculate(data,start_value,end_value,as_of=None):
             eligible=[row for row in prices if row["effective_on"]<=due.isoformat()]
             if due>=start and eligible and key not in actual_income_keys:
                 amount=max(eligible,key=lambda row:row["effective_on"])["amount_minor"]
-                add(f"income-rule:{rule['id']}:{due}",due.isoformat(),amount,rule["description"],"income","overdue" if due<as_of else "expected",rule_id=rule["id"],scheduled_on=due.isoformat())
+                add(f"income-rule:{rule['id']}:{due}",due.isoformat(),amount,rule["description"],"income","received" if automatic and due<=as_of else "overdue" if due<as_of else "expected",rule_id=rule["id"],scheduled_on=due.isoformat(),auto_received=automatic and due<=as_of)
             index+=1
+    return events
+
+
+def calculate(data,start_value,end_value,as_of=None):
+    as_of=as_of or today()
+    start,end=date.fromisoformat(start_value),date.fromisoformat(end_value)
+    if start.isoformat()!=start_value or end.isoformat()!=end_value or end<start or (end-start).days>3660:
+        raise ValueError("Tarih aralığını kontrol edin; en fazla 10 yıl seçilebilir.")
+    events=[]
+    def add(key,when,amount,description,kind,status,**extra):
+        if start_value<=when<=end_value:
+            events.append({"id":key,"date":when,"amount_minor":int(amount),"description":description,"kind":kind,"status":status,**extra})
+    events.extend(income_events(data,start_value,end_value,as_of))
     expenses={row["id"]:row for row in data["expenses"]}
     completed={}
     linked_expenses=set()
@@ -176,7 +188,7 @@ def overview(user_id,start_value,end_value):
     result=calculate(data,start_value,end_value)
     result["rules"]=[{**rule,"revision":rule_revision(rule),"deletion_revision":managed_revision(data,"payment_plan",rule["id"]),"display_start_on":payment_due(data,rule,rule["start_on"]),"display_end_on":payment_due(data,rule,rule["end_on"]) if rule["end_on"] else None,"has_paid":any(row["recurring_id"]==rule["id"] for row in data["payment_events"]+data["occurrences"]),"scheduled_total_minor":str(sum(int(rule["amount_minor"]) for _ in payment_dates(rule,date.fromisoformat(start_value),date.fromisoformat(end_value))) if rule["status"]=="active" else 0)} for rule in data["recurring"]]
     result["income_rules"]=[{**row,"revision":managed_revision(data,"income_rule",row["id"]),"amount_minor":str(income_rule_price(data,row)),"has_receipts":any(item["rule_id"]==row["id"] and item["status"]=="received" for item in data["income_records"])} for row in data["income_rules"]]
-    result["income_records"]=[{**row,"revision":managed_revision(data,"income_record",row["id"])} for row in data["income_records"]]
+    result["income_records"]=[{**row,"cash_recognized_on":row["expected_on"] if (data.get("opening") or {}).get("auto_income_on_due") and row["status"]=="expected" and row["expected_on"]<=today().isoformat() else None,"revision":managed_revision(data,"income_record",row["id"])} for row in data["income_records"]]
     result["income_rule_amounts"]=data["income_rule_amounts"]
     result['cash_position']=cash_position(data)
     projection=projected_balance(data,end_value)
@@ -201,6 +213,10 @@ def initialize():
     profile_settings.initialize()
     with core.connect() as db:
         pg=hasattr(db,"_conn")
+        if pg:
+            db.execute('ALTER TABLE cash_settings ADD COLUMN IF NOT EXISTS auto_income_on_due INTEGER NOT NULL DEFAULT 0 CHECK(auto_income_on_due IN (0,1))')
+        elif 'auto_income_on_due' not in {row[1] for row in db.execute('PRAGMA table_info(cash_settings)')}:
+            db.execute('ALTER TABLE cash_settings ADD COLUMN auto_income_on_due INTEGER NOT NULL DEFAULT 0 CHECK(auto_income_on_due IN (0,1))')
         identity="BIGSERIAL" if pg else "INTEGER"
         integer="BIGINT" if pg else "INTEGER"
         db.execute(f"""CREATE TABLE IF NOT EXISTS financial_record_deletions (
@@ -556,7 +572,9 @@ def cash_position(data,as_of=None):
     if not opening or opening['effective_on']>as_of:return {'configured':bool(opening),'balance_minor':None,'as_of':as_of,'effective_on':opening['effective_on'] if opening else None,'opening_balance_minor':str(opening['opening_balance_minor']) if opening else None}
     effective=opening['effective_on']
     in_range=lambda value: bool(value) and effective<=value<=as_of
-    received=sum(row['amount_minor'] for row in data['income_records'] if row['status']=='received' and in_range(row['received_on']))
+    recognized=income_events(data,effective,as_of,date.fromisoformat(as_of))
+    received=sum(row['amount_minor'] for row in recognized if row['status']=='received')
+    automatic=sum(row['amount_minor'] for row in recognized if row.get('auto_received'))
     expenses={row['id']:row for row in data['expenses']}
     linked={row['expense_id'] for row in data['occurrences'] if row['expense_id'] in expenses}
     paid=sum(row['amount_minor'] for row in data['expenses'] if row['id'] not in linked and row['card_id'] is None and in_range(row['spent_on']))
@@ -565,12 +583,14 @@ def cash_position(data,as_of=None):
     paid+=sum(row['amount_minor'] for row in data['repayments'] if in_range(row['paid_on']))
     paid+=sum(row['amount_minor'] for row in data.get('card_monthly_payments',[]) if in_range(row['paid_on']))
     adjustments=sum(row['amount_minor'] for row in data['adjustments'] if in_range(row['adjustment_on']))
-    return {'configured':True,'as_of':as_of,'effective_on':effective,'opening_balance_minor':str(opening['opening_balance_minor']),'revision':opening_revision(opening),'balance_minor':str(opening['opening_balance_minor']+received-paid+adjustments),'received_minor':str(received),'paid_minor':str(paid)}
+    return {'configured':True,'as_of':as_of,'effective_on':effective,'opening_balance_minor':str(opening['opening_balance_minor']),'revision':opening_revision(opening),'balance_minor':str(opening['opening_balance_minor']+received-paid+adjustments),'received_minor':str(received),'automatic_income_minor':str(automatic),'auto_income_on_due':bool(opening.get('auto_income_on_due')),'paid_minor':str(paid)}
 
 
 def opening_revision(opening):
     import hashlib
-    return hashlib.sha256(f"{opening['opening_balance_minor']}:{opening['effective_on']}".encode()).hexdigest()
+    basis=f"{opening['opening_balance_minor']}:{opening['effective_on']}"
+    if dict(opening).get('auto_income_on_due'):basis+=':scheduled'
+    return hashlib.sha256(basis.encode()).hexdigest()
 
 
 def save_opening(user_id,payload):
@@ -579,12 +599,15 @@ def save_opening(user_id,payload):
     if amount<0 or effective>today() or effective.isoformat()!=payload.get('effective_on'):raise ValueError('Başlangıç bakiyesi ve tarihini kontrol edin; gelecek gün seçilemez.')
     with core.LOCK,core.connect() as db:
         _write_lock(db,'cash_settings',user_id)
-        old=db.execute('SELECT opening_balance_minor,effective_on FROM cash_settings WHERE user_id=?',(user_id,)).fetchone()
+        old=db.execute('SELECT opening_balance_minor,effective_on,auto_income_on_due FROM cash_settings WHERE user_id=?',(user_id,)).fetchone()
+        mode=payload.get('auto_income_on_due',old['auto_income_on_due'] if old else 0)
+        if isinstance(mode,bool):mode=int(mode)
+        if not isinstance(mode,int) or mode not in (0,1):raise ValueError('Gelirin tarihte otomatik eklenmesi seçimini kontrol edin.')
         if old:
-            if (old['opening_balance_minor'],old['effective_on'])!=(amount,effective.isoformat()):
+            if (old['opening_balance_minor'],old['effective_on'],old['auto_income_on_due'])!=(amount,effective.isoformat(),mode):
                 if payload.get('revision')!=opening_revision(old):raise Conflict('Başlangıç bakiyesi değişmiş. Güncel bilgiyi yükleyip yeniden düzenleyin.')
-                db.execute('UPDATE cash_settings SET opening_balance_minor=?,effective_on=? WHERE user_id=?',(amount,effective.isoformat(),user_id))
-        else:db.execute('INSERT INTO cash_settings(user_id,opening_balance_minor,effective_on) VALUES(?,?,?)',(user_id,amount,effective.isoformat()))
+                db.execute('UPDATE cash_settings SET opening_balance_minor=?,effective_on=?,auto_income_on_due=? WHERE user_id=?',(amount,effective.isoformat(),mode,user_id))
+        else:db.execute('INSERT INTO cash_settings(user_id,opening_balance_minor,effective_on,auto_income_on_due) VALUES(?,?,?,?)',(user_id,amount,effective.isoformat(),mode))
     return {'ok':True}
 
 
@@ -619,6 +642,8 @@ def projected_balance(data,end_value,as_of=None):
     if position['balance_minor'] is None or end<as_of:return None
     candidates=[as_of.isoformat()]
     for key,field in (('recurring','start_on'),('income_rules','start_on'),('income_records','expected_on'),('statements','due_on'),('card_monthly_totals','due_on')):
+        if key in ('income_rules','income_records') and (data.get('opening') or {}).get('auto_income_on_due'):
+            continue  # Past scheduled income is already recognized by cash_position.
         candidates.extend(row[field] for row in data.get(key,[]) if row.get(field) and row[field]<=end_value)
     first=min(candidates)
     if (end-date.fromisoformat(first)).days>3660:return None
@@ -913,7 +938,7 @@ def restore_financial_record(user_id,payload):
         if token.startswith('opening-transfer:'):
             import json,base64
             change=json.loads(base64.urlsafe_b64decode(token.split(':',1)[1]))
-            opening=db.execute('SELECT opening_balance_minor,effective_on FROM cash_settings WHERE user_id=?',(user_id,)).fetchone()
+            opening=db.execute('SELECT opening_balance_minor,effective_on,auto_income_on_due FROM cash_settings WHERE user_id=?',(user_id,)).fetchone()
             if not opening or opening_revision(opening)!=change['after']:raise Conflict('Taşıma sonrasında başlangıç bakiyesi düzenlenmiş; güncel bakiye ezilmedi.')
             if change['previous']:
                 previous=change['previous']
