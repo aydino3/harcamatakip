@@ -612,3 +612,21 @@ class SimpleCashflowTest(unittest.TestCase):
         self.assertEqual(after['totals']['income_received_minor'],'0')
         finance.restore_financial_record(self.user,change)
         self.assertEqual(finance.overview(self.user,'2024-01-01','2024-01-31')['totals']['income_received_minor'],'12345')
+
+    def test_legacy_profile_due_day_overrides_old_core_card_default(self):
+        import profile_settings
+        card_id=core.save_credit_card(self.user,{'bank_name':'Eski banka','display_name':'Eski kart','closing_day':22,'due_day':3})
+        with core.connect() as db:
+            db.execute('INSERT INTO profile_cards(user_id,legacy_card_id,bank_name,display_name,payment_due_on) VALUES(?,?,?,?,?)',(self.user,card_id,'Eski banka','Eski kart','2026-11-09'))
+        card=profile_settings.get_profile(self.user)['cards'][0]
+        self.assertEqual(card['payment_due_day'],9)
+        self.assertEqual(finance.configured_card_due(finance.read_data(self.user),f'legacy:{card_id}','2024-02'),'2024-02-09')
+
+    def test_existing_invoice_date_becomes_bounded_offset_without_rewriting_payments(self):
+        card=self.card(payment_due_day=26)
+        with core.connect() as db:
+            db.execute('INSERT INTO card_monthly_totals(user_id,card_ref,month,amount_minor,due_on) VALUES(?,?,?,?,?)',(self.user,card,'2026-11',30000,'2026-11-27'))
+        row=finance.overview(self.user,'2026-11-01','2026-11-30')['card_monthly_debt']['cards'][0]
+        self.assertEqual((row['due_on'],row['due_day_offset']),('2026-11-27',1))
+        finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2026-11','amount':'300','due_day_offset':0,'version':1})
+        self.assertEqual(finance.overview(self.user,'2026-11-01','2026-11-30')['card_monthly_debt']['cards'][0]['due_on'],'2026-11-26')

@@ -4,9 +4,10 @@ from datetime import date, timedelta
 
 
 def due_day(card):
-    value=card.get('payment_due_day') or card.get('monthly_due_day') or card.get('due_day')
+    value=card.get('payment_due_day')
     if value is None and card.get('payment_due_on'):
         value=date.fromisoformat(card['payment_due_on']).day
+    if value is None:value=card.get('monthly_due_day') or card.get('due_day')
     if isinstance(value,bool) or not isinstance(value,int) or not 1<=value<=31:
         raise ValueError('Kartın son ödeme gününü Profil ve Ayarlar bölümünde 1–31 olarak girin.')
     return value
