@@ -304,3 +304,74 @@ tbody tr:hover{background:#ffffff03}
 
 /* Native date fields have intrinsic minimum widths in Chromium. */
 .simple-period input,.month-navigation input,.extra-spending input[type=month]{min-width:0;max-width:100%}
+
+/* Cinematic elevation: hierarchy and lighting, with all bindings left intact. */
+body{
+  background:radial-gradient(ellipse 68% 42% at 84% 0%,#6652bf45,transparent 75%),radial-gradient(ellipse 55% 40% at 64% 43%,#137b9a1c,transparent 80%),linear-gradient(145deg,#070c16,#10132a 56%,#08121e);
+}
+.content{position:relative;isolation:isolate}
+.content::before{content:"";position:absolute;z-index:-1;inset:0 0 auto;height:740px;pointer-events:none;background:radial-gradient(ellipse at 73% 48%,#3699c61b,transparent 55%),radial-gradient(ellipse at 18% 8%,#8e5ce020,transparent 60%)}
+.content header{position:relative;border-bottom-color:#7f83b22b;padding-top:5px;padding-bottom:27px}
+.content header::after{content:"";position:absolute;left:0;bottom:-1px;width:96px;height:1px;pointer-events:none;background:linear-gradient(90deg,#bcb0ffbb,#6acde38c,transparent)}
+.content h1{font-size:clamp(34px,3.25vw,46px);font-weight:710;letter-spacing:-1.6px;line-height:1.16;text-shadow:0 2px 24px #aaa3ff0c}
+.content header .eyebrow{color:#b4a7ed;font-size:9px;letter-spacing:2.6px;margin-bottom:14px}
+.content header .muted{color:#a9b8d2;margin-top:12px}
+.monthly-heading{margin-top:13px;margin-bottom:24px}
+.monthly-heading h2{font-size:28px;letter-spacing:-.8px}
+.monthly-heading .eyebrow{color:#93a7c8;font-size:9px;letter-spacing:2px}
+.monthly-stats{position:relative;isolation:isolate;gap:17px;margin-bottom:30px}
+.monthly-stats::before{content:"";position:absolute;inset:-35px -20px;z-index:-1;pointer-events:none;background:radial-gradient(ellipse at 85% 50%,#32d5d328,transparent 48%),radial-gradient(ellipse at 42% 55%,#7d5fe522,transparent 55%)}
+.monthly-stats .stat{position:relative;isolation:isolate;overflow:hidden;min-height:216px;align-content:space-between;gap:22px;border-radius:19px;border:1px solid #7586b63d;padding:25px 24px;background:linear-gradient(135deg,#28344ed4,#151e31f2 75%);box-shadow:0 18px 42px #0000002b,inset 0 1px 0 #e0e7ff14}
+.monthly-stats .stat::before{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(ellipse at 0% 0%,#8aa7df21,transparent 75%);transition:opacity var(--motion-ui);opacity:.65}
+.monthly-stats .stat>span{font-size:10px;font-weight:650;letter-spacing:1.1px;text-transform:uppercase;color:#bac8e3}
+.monthly-stats .stat strong{font-size:clamp(27px,2.3vw,34px);letter-spacing:-1px;line-height:1.15;color:#f1f5ff}
+.monthly-stats .stat small{max-width:33ch;color:#b0bfd7;line-height:1.8;font-size:10.5px}
+.monthly-stats .stat.spend{background:radial-gradient(ellipse at 100% 0%,#9e75ec33,transparent 75%),linear-gradient(135deg,#2b2e55ed,#1c2440f5);border-color:#a08ce057;box-shadow:0 18px 42px #0807183b,inset 0 1px 0 #e5d8ff18}
+.monthly-stats .stat.spend::before{background:radial-gradient(ellipse at 80% 10%,#b37ee52e,transparent 75%)}
+.monthly-stats .stat.spend>span{color:#d4c9ed}
+.monthly-stats .stat:last-child{background:radial-gradient(ellipse at 110% -10%,#80fff44d,transparent 58%),linear-gradient(125deg,#1e4b59f5,#143743f5 55%,#142d3d);border-color:#88e9ec80;border-radius:20px;box-shadow:0 0 0 1px #80dfdf0a,0 17px 48px #031a2a66,0 0 42px #46d6db0d,inset 0 1px 0 #deffff2e;padding:27px}
+.monthly-stats .stat:last-child::before{background:linear-gradient(115deg,#ccffff08,transparent 58%);opacity:1}
+.monthly-stats .stat:last-child::after{content:"";position:absolute;z-index:-1;right:-42px;top:-48px;width:180px;height:180px;border-radius:50%;border:1px solid #c6ffff26;box-shadow:0 0 0 24px #a8ffff06,0 0 0 49px #a8ffff04;pointer-events:none}
+.monthly-stats .stat:last-child>span{color:#b7eced;max-width:24ch}
+.monthly-stats .stat:last-child strong{color:#d6fff4;font-size:clamp(32px,3.25vw,46px);letter-spacing:-1.5px;text-shadow:0 0 28px #8affd81c}
+.monthly-stats .stat:last-child small{color:#bbd7df;max-width:36ch;position:relative}
+.panel{background:radial-gradient(ellipse at 0% 0%,#697baa0c,transparent 60%),linear-gradient(135deg,#19243aeb,#111b2beb);border-color:#53648a45;box-shadow:0 14px 40px #00000025,inset 0 1px 0 #d4dfff0a}
+.panel-head h2{letter-spacing:-.45px}
+.saved-payments-overview{border-top:1px solid #94a9d75c;background:linear-gradient(125deg,#1b2940de,#141d30de)}
+.overall-summary{background:linear-gradient(135deg,#101b2cbd,#101728d9);border-color:#53648a38;box-shadow:inset 0 1px 0 #ffffff03}
+.overall-stats .stat{background:#15213596;border-color:#4c5d7b40;box-shadow:none;border-radius:12px}
+.overall-stats .stat strong{color:#dae4f5}
+.cash-balance-card{background:radial-gradient(ellipse at 100% 0%,#64c9bb1f,transparent 60%),linear-gradient(110deg,#18383ee8,#122b35e8);border-color:#6fb7ad55;box-shadow:0 12px 36px #0000001f,inset 0 1px 0 #bffff317}
+.card-spending{background:radial-gradient(ellipse at 100% 0%,#7460b917,transparent 65%),linear-gradient(130deg,#202d45dc,#141e32f5);border-color:#63749c59;box-shadow:0 12px 30px #00000023,inset 0 1px 0 #e6ecff0b}
+.card-spending:focus-within{border-color:#ac9cdd99;box-shadow:0 12px 34px #00000030,0 0 0 1px #b2a0ef0c}
+.extra-budget article{background:linear-gradient(140deg,#26344ed9,#19273bd9);box-shadow:0 9px 24px #00000016,inset 0 1px 0 #d6e1ff0a}
+.extra-budget .budget-available{background:radial-gradient(ellipse at 100% 0%,#66c7b81a,transparent 70%),linear-gradient(130deg,#1c4041,#183137)}
+.extra-budget .budget-over{background:radial-gradient(ellipse at 100% 0%,#e8907d13,transparent 70%),linear-gradient(130deg,#3e2a3b,#302331)}
+.sidebar{background:radial-gradient(ellipse at 0% 0%,#6c56bd14,transparent 55%),linear-gradient(180deg,#111a2b,#0b1323);box-shadow:12px 0 42px #0000001f;isolation:isolate}
+.brandmark{background:linear-gradient(140deg,#af9ef6,#7464df 46%,#40479a);box-shadow:0 7px 22px #7e5add35,inset 0 1px 0 #fff6}
+.sidebar nav a[aria-current=page]{background:linear-gradient(100deg,#9280e62b,#6764a00c);border-color:#9584d966;box-shadow:inset 3px 0 0 #b2a0ff,0 5px 20px #00000014;color:#e3d9ff}
+.primary{background:linear-gradient(130deg,#6e5bd7,#5945bf);border-color:#aa98f173;box-shadow:0 5px 18px #6750b72b,inset 0 1px 0 #eee3ff26}
+.primary:hover:not(:disabled){background:linear-gradient(130deg,#7563de,#6551cd);box-shadow:0 8px 24px #7a61d53b,inset 0 1px 0 #fff3}
+.secondary:hover:not(:disabled){box-shadow:0 5px 16px #00000022,inset 0 1px 0 #e9efff0d}
+.entry-dialog{background:radial-gradient(ellipse at 100% 0%,#8e6fcd1c,transparent 55%),linear-gradient(145deg,#222e48,#151e31 75%);border-color:#8a85b66e;box-shadow:0 36px 100px #0009,inset 0 1px 0 #ece3ff1a}
+.entry-heading{border-bottom-color:#9f9ac535}
+.entry-dialog .amount-field{background:radial-gradient(ellipse at 100% 0%,#b997ed13,transparent 70%),linear-gradient(110deg,#2b3857,#24304a);border-color:#8e91bb55}
+@media(min-width:1100px){.monthly-stats{grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(0,1.34fr)}}
+@media(hover:hover) and (prefers-reduced-motion:no-preference){
+  .monthly-stats .stat{transition:box-shadow var(--motion-ui),border-color var(--motion-ui)}
+  .monthly-stats .stat:hover{box-shadow:0 21px 48px #00000038,inset 0 1px 0 #e4ebff20;border-color:#a0acd170}
+  .monthly-stats .stat:hover::before{opacity:1}
+  .monthly-stats .stat:last-child:hover{border-color:#a3f1edb8;box-shadow:0 20px 48px #031a2a70,0 0 30px #6adfe618,inset 0 1px 0 #e9ffff33}
+  .card-spending:hover{border-color:#918bc46e;box-shadow:0 14px 34px #00000030,inset 0 1px 0 #e6ecff12}
+}
+@media(max-width:760px){
+  .content h1{font-size:33px;letter-spacing:-1.1px}.content header{padding-bottom:24px}
+  .monthly-stats{gap:13px;margin-bottom:27px}.monthly-stats::before{inset:-15px 0;background:radial-gradient(ellipse at 80% 80%,#32d5d31a,transparent 60%)}
+  .monthly-stats .stat{min-height:154px;padding:23px;gap:18px}.monthly-stats .stat strong{font-size:34px}
+  .monthly-stats .stat:last-child{min-height:207px;padding:25px}.monthly-stats .stat:last-child strong{font-size:42px}
+  .monthly-stats .stat:last-child small{max-width:40ch}.monthly-stats .stat:last-child::after{width:150px;height:150px;right:-25px;top:-40px}
+  .monthly-heading h2{font-size:25px}.panel{box-shadow:0 10px 28px #00000020,inset 0 1px 0 #d4dfff08}
+}
+@media(max-width:380px){.monthly-stats .stat{padding:20px}.monthly-stats .stat strong{font-size:30px}.monthly-stats .stat:last-child strong{font-size:36px}.monthly-stats .stat:last-child{padding:22px}}
+@media(prefers-reduced-motion:reduce){.monthly-stats .stat::before{transition:none}.monthly-stats .stat,.card-spending{transition:none!important}}
+@media(forced-colors:active){.monthly-stats .stat::before,.monthly-stats .stat::after,.monthly-stats::before,.content::before,.content header::after{display:none}.monthly-stats .stat{background:Canvas;border-color:CanvasText}.monthly-stats .stat :is(strong,span,small){color:CanvasText}}
