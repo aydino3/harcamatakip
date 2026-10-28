@@ -301,3 +301,6 @@ tbody tr:hover{background:#ffffff03}
 .content,.profile-form,.profile-form label{min-width:0}
 .profile-form{width:100%}
 .profile-form input{min-width:0;max-width:100%}
+
+/* Native date fields have intrinsic minimum widths in Chromium. */
+.simple-period input,.month-navigation input,.extra-spending input[type=month]{min-width:0;max-width:100%}
