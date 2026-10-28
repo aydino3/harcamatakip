@@ -9,6 +9,7 @@ import calendar
 import io
 import os
 import secrets
+import re
 import sqlite3
 import threading
 import sys
@@ -242,10 +243,12 @@ def init_db():
         from pg_compat import connect_pg
         with connect_pg(url) as db:
             _apply_pg_schema(db)
+            _initialize_usernames(db)
         return
     # SQLite path
     with LOCK, connect(allow_create=True) as db:
         _apply_additive_schema(db)
+        _initialize_usernames(db)
         db.execute("DELETE FROM budgets WHERE category_id IS NULL AND id NOT IN (SELECT MAX(id) FROM budgets WHERE category_id IS NULL GROUP BY user_id,month)")
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS budget_overall_unique ON budgets(user_id,month) WHERE category_id IS NULL")
     if os.environ.get("APP_ENV", "development").strip().lower() == "production":
@@ -971,7 +974,49 @@ def revoke_invitation(invitation_id):
     return cursor.rowcount == 1
 
 
-def create_user(email: str, password: str, invitation_token=None, require_invitation=None) -> int:
+class InvalidUsername(ValueError):
+    pass
+
+
+class UsernameUnavailable(ValueError):
+    pass
+
+
+def normalize_username(value):
+    if not isinstance(value,str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,29}",value.strip()):
+        raise InvalidUsername("Kullanıcı adı 3–30 karakter olmalı; İngilizce harf, rakam, nokta, tire ve alt çizgi kullanabilirsin.")
+    return value.strip().lower()
+
+
+def username_integrity_error(error):
+    return 'users_username_unique' in str(error) or 'users.username' in str(error)
+
+
+def _initialize_usernames(db):
+    """Reserve existing visible names without renaming or deleting any account."""
+    pg=hasattr(db,'_conn')
+    if pg:
+        db.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT')
+        db.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT')
+    else:
+        columns={row[1] for row in db.execute('PRAGMA table_info(users)')}
+        for field in ('username','display_name'):
+            if field not in columns:db.execute(f'ALTER TABLE users ADD COLUMN {field} TEXT')
+    db.execute('CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique ON users(lower(username)) WHERE username IS NOT NULL')
+    users=[dict(row) for row in db.execute('SELECT id,email,display_name,username FROM users')]
+    occupied={row['username'].lower() for row in users if row['username']}
+    candidates={}
+    for row in users:
+        if row['username']:continue
+        try:name=normalize_username(row['display_name'] or row['email'].split('@')[0])
+        except InvalidUsername:continue
+        candidates.setdefault(name,[]).append(row['id'])
+    for name,ids in candidates.items():
+        if name not in occupied:
+            db.execute('UPDATE users SET username=? WHERE id=? AND username IS NULL',(name,ids[0]))
+
+
+def create_user(email: str, password: str, invitation_token=None, require_invitation=None, username=None) -> int:
     if not isinstance(email, str) or not isinstance(password, str):
         raise ValueError("invalid credentials")
     email = email.strip().lower()
@@ -982,6 +1027,7 @@ def create_user(email: str, password: str, invitation_token=None, require_invita
     if require_invitation and (not isinstance(invitation_token, str) or not 20 <= len(invitation_token) <= 256):
         raise InvalidInvitation("invalid invitation")
     token_hash = hashlib.sha256(invitation_token.encode("utf-8")).hexdigest() if require_invitation else None
+    username = normalize_username(username) if username is not None else None
     salt = secrets.token_bytes(16)
     with connect() as db:
         if require_invitation:
@@ -989,8 +1035,14 @@ def create_user(email: str, password: str, invitation_token=None, require_invita
             invitation = db.execute("SELECT id FROM invitations WHERE token_hash=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>?", (token_hash, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))).fetchone()
             if not invitation:
                 raise InvalidInvitation("invalid invitation")
-        cur = db.execute("INSERT INTO users(email,password_hash,password_salt) VALUES(?,?,?)",
-                         (email, password_digest(password, salt), salt))
+        if username is not None and db.execute('SELECT 1 FROM users WHERE lower(username)=?',(username,)).fetchone():
+            raise UsernameUnavailable('Bu kullanıcı adı zaten kullanılıyor. Başka bir ad seç.')
+        try:
+            cur = db.execute("INSERT INTO users(email,password_hash,password_salt,username,display_name) VALUES(?,?,?,?,?)",
+                             (email,password_digest(password,salt),salt,username,username))
+        except _DB_INTEGRITY_ERRORS as error:
+            if username_integrity_error(error):raise UsernameUnavailable('Bu kullanıcı adı zaten kullanılıyor. Başka bir ad seç.') from error
+            raise
         user_id = cur.lastrowid
         db.executemany("INSERT INTO categories(user_id,name) VALUES(?,?)", [(user_id, n) for n in DEFAULT_CATEGORIES])
         db.executemany("INSERT INTO payment_methods(user_id,name) VALUES(?,?)", [(user_id, n) for n in DEFAULT_METHODS])

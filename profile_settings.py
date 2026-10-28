@@ -39,7 +39,7 @@ def initialize():
 
 def get_profile(user_id):
     with core.connect() as db:
-        user=db.execute('SELECT id,email,display_name FROM users WHERE id=?',(user_id,)).fetchone()
+        user=db.execute('SELECT id,email,display_name,username FROM users WHERE id=?',(user_id,)).fetchone()
         legacy=[dict(row) for row in db.execute('SELECT c.id,c.bank_name,c.display_name,c.last_four,c.active,c.due_day,COALESCE((SELECT MIN(s.due_on) FROM card_statements s WHERE s.card_id=c.id AND s.user_id=c.user_id AND s.due_on>=?),(SELECT MAX(s.due_on) FROM card_statements s WHERE s.card_id=c.id AND s.user_id=c.user_id)) known_payment_due_on FROM credit_cards c WHERE c.user_id=? ORDER BY c.active DESC,c.display_name',(today().isoformat(),user_id)).fetchall()]
         settings=[dict(row) for row in db.execute('SELECT * FROM profile_cards WHERE user_id=? ORDER BY active DESC,display_name',(user_id,)).fetchall()]
     if not user:
@@ -56,15 +56,24 @@ def get_profile(user_id):
         setting=next((row for row in settings if (row['legacy_card_id']==int(card['id'].split(':')[1]) if card['id'].startswith('legacy:') else row['id']==int(card['id'].split(':')[1]))),None)
         card['payment_due_day']=card_schedule.due_day({**card,**({'payment_due_day':setting.get('payment_due_day')} if setting else {})})
         card['payment_due_on']=card_schedule.next_due(card,today())
-    return {'id':user['id'],'email':user['email'],'display_name':user['display_name'] or user['email'].split('@')[0],'cards':cards}
+    return {'id':user['id'],'email':user['email'],'username':user['username'],'display_name':user['display_name'] or user['email'].split('@')[0],'cards':cards}
 
 
 def save_name(user_id,payload):
     name=payload.get('display_name','')
     if not isinstance(name,str) or not 1<=len(name.strip())<=80:
         raise ValueError('Profil adı 1–80 karakter olmalı.')
-    with core.connect() as db:
-        db.execute('UPDATE users SET display_name=? WHERE id=?',(name.strip(),user_id))
+    username=core.normalize_username(payload['username']) if 'username' in payload else None
+    try:
+        with core.connect() as db:
+            if username is not None:
+                if db.execute('SELECT 1 FROM users WHERE lower(username)=? AND id<>?',(username,user_id)).fetchone():
+                    raise core.UsernameUnavailable('Bu kullanıcı adı zaten kullanılıyor. Başka bir ad seç.')
+                db.execute('UPDATE users SET display_name=?,username=? WHERE id=?',(name.strip(),username,user_id))
+            else:db.execute('UPDATE users SET display_name=? WHERE id=?',(name.strip(),user_id))
+    except core._DB_INTEGRITY_ERRORS as error:
+        if core.username_integrity_error(error):raise core.UsernameUnavailable('Bu kullanıcı adı zaten kullanılıyor. Başka bir ad seç.') from error
+        raise
     return get_profile(user_id)
 
 

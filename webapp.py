@@ -512,7 +512,13 @@ def create_app(test_config: dict | None = None) -> Flask:
             if web.config["PRIVATE_BETA"] and not isinstance(data.get("invitation_token"), str):
                 return json_error("Özel beta kaydı için geçerli bir davet kodu gerekir.", 403)
             try:
-                user_id = core.create_user(data.get("email", ""), data.get("password", ""), data.get("invitation_token"), web.config["PRIVATE_BETA"])
+                # Missing usernames are rejected at the public registration boundary.
+                username = core.normalize_username(data.get("username"))
+                user_id = core.create_user(data.get("email", ""), data.get("password", ""), data.get("invitation_token"), web.config["PRIVATE_BETA"], username=username)
+            except core.UsernameUnavailable as error:
+                return json_error(str(error),409)
+            except core.InvalidUsername as error:
+                return json_error(str(error),400)
             except core.InvalidInvitation:
                 return json_error("Davet kodu geçersiz, süresi dolmuş veya kullanılmış.", 403)
             except (*core._DB_INTEGRITY_ERRORS,):

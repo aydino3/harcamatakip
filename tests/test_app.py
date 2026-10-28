@@ -964,7 +964,7 @@ class HttpApiTest(unittest.TestCase):
         except HTTPError as error:return error.code,json.loads(error.read() or b"{}")
 
     def register(self,opener,email):
-        code,data=self.request(opener,"/api/register","POST",{"email":email,"password":"local-api-test-pass"})
+        code,data=self.request(opener,"/api/register","POST",{"email":email,"username":email.split("@")[0],"password":"local-api-test-pass"})
         self.assertEqual(code,200)
         return data["csrf"]
 
@@ -973,18 +973,18 @@ class HttpApiTest(unittest.TestCase):
         self.flask_app.config["PRIVATE_BETA"]=True
         client=self.flask_app.test_client()
         try:
-            self.assertEqual(client.post("/api/register",json={"email":"open-beta@example.invalid","password":"local-api-test-pass"}).status_code,403)
-            self.assertEqual(client.post("/api/register",json={"email":"bad-beta@example.invalid","password":"local-api-test-pass","invitation_token":"invalid-token-value-123456"}).status_code,403)
+            self.assertEqual(client.post("/api/register",json={"email":"open-beta@example.invalid","username":"open-beta","password":"local-api-test-pass"}).status_code,403)
+            self.assertEqual(client.post("/api/register",json={"email":"bad-beta@example.invalid","username":"bad-beta","password":"local-api-test-pass","invitation_token":"invalid-token-value-123456"}).status_code,403)
             expired_id,expired=app.create_invitation(1)
             with app.connect() as db:db.execute("UPDATE invitations SET expires_at=datetime('now','-1 hour') WHERE id=?",(expired_id,))
-            self.assertEqual(client.post("/api/register",json={"email":"expired-beta@example.invalid","password":"local-api-test-pass","invitation_token":expired}).status_code,403)
+            self.assertEqual(client.post("/api/register",json={"email":"expired-beta@example.invalid","username":"expired-beta","password":"local-api-test-pass","invitation_token":expired}).status_code,403)
             invitation_id,token=app.create_invitation(24)
-            registered=client.post("/api/register",json={"email":"invited-beta@example.invalid","password":"local-api-test-pass","invitation_token":token})
+            registered=client.post("/api/register",json={"email":"invited-beta@example.invalid","username":"invited-beta","password":"local-api-test-pass","invitation_token":token})
             self.assertEqual(registered.status_code,200,registered.get_json())
             session=client.get("/api/session").get_json()
             self.assertTrue(session["private_beta"])
             self.assertNotIn(token,str(session))
-            reused=client.post("/api/register",json={"email":"reuse-beta@example.invalid","password":"local-api-test-pass","invitation_token":token})
+            reused=client.post("/api/register",json={"email":"reuse-beta@example.invalid","username":"reuse-beta","password":"local-api-test-pass","invitation_token":token})
             self.assertEqual(reused.status_code,403)
             with app.connect() as db:
                 self.assertEqual(db.execute("SELECT count(*) FROM users WHERE email='reuse-beta@example.invalid'").fetchone()[0],0)
@@ -1002,7 +1002,7 @@ class HttpApiTest(unittest.TestCase):
         client=self.flask_app.test_client()
         try:
             _,token=app.create_invitation(24)
-            response=client.post("/api/register",json={"email":"invitation-owner@example.invalid","password":"local-api-test-pass","invitation_token":token})
+            response=client.post("/api/register",json={"email":"invitation-owner@example.invalid","username":"invitation-owner","password":"local-api-test-pass","invitation_token":token})
             self.assertEqual(response.status_code,200)
             csrf=response.get_json()["csrf"]
             owner_id=response.get_json()["user_id"]
@@ -1070,10 +1070,10 @@ class HttpApiTest(unittest.TestCase):
         self.assertEqual(code,401)
         self.assertEqual(known_wrong["error"],"E-posta veya parola hatalı.")
         self.assertEqual(unknown["error"],"Çok sayıda deneme yapıldı. Lütfen bir süre sonra tekrar deneyin.")
-        normal_login=self.request(self.a,"/api/login","POST",{"email":"api-a@example.invalid","password":"local-api-test-pass"})
+        normal_login=self.request(self.a,"/api/login","POST",{"email":"api-a@example.invalid","username":"api-a","password":"local-api-test-pass"})
         self.assertEqual(normal_login[0],200)
         other_client=self.flask_app.test_client()
-        login=other_client.post("/api/login",json={"email":"api-a@example.invalid","password":"local-api-test-pass"},environ_base={"REMOTE_ADDR":"198.51.100.10"})
+        login=other_client.post("/api/login",json={"email":"api-a@example.invalid","username":"api-a","password":"local-api-test-pass"},environ_base={"REMOTE_ADDR":"198.51.100.10"})
         self.assertEqual(login.status_code,200)
         self.assertTrue(login.get_json()["csrf"])
 
@@ -1102,14 +1102,14 @@ class HttpApiTest(unittest.TestCase):
 
     def test_logout_revokes_only_current_session(self):
         second=build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
-        _,login=self.request(second,"/api/login","POST",{"email":"api-a@example.invalid","password":"local-api-test-pass"})
+        _,login=self.request(second,"/api/login","POST",{"email":"api-a@example.invalid","username":"api-a","password":"local-api-test-pass"})
         self.assertEqual(self.request(self.a,"/api/logout","POST",{},self.csrf_a)[0],200)
         self.assertEqual(self.request(self.a,"/api/options")[0],401)
         self.assertEqual(self.request(second,"/api/options")[0],200)
         self.assertTrue(login["csrf"])
 
     def test_production_login_cookie_has_secure_attribute(self):
-        request=Request(self.base+"/api/login",data=json.dumps({"email":"api-a@example.invalid","password":"local-api-test-pass"}).encode(),headers={"Content-Type":"application/json"},method="POST")
+        request=Request(self.base+"/api/login",data=json.dumps({"email":"api-a@example.invalid","username":"api-a","password":"local-api-test-pass"}).encode(),headers={"Content-Type":"application/json"},method="POST")
         with patch.dict(os.environ,{"APP_ENV":"production"}):
             with self.a.open(request) as response:
                 cookie=response.headers.get("Set-Cookie","")
@@ -1276,7 +1276,7 @@ class HttpApiTest(unittest.TestCase):
         self.assertEqual(self.request(self.a,f"/api/recurring/{rule_a}/occurrences/{today}/complete","POST",{},self.csrf_a)[0],200)
         self.assertEqual(self.request(self.b,f"/api/recurring/{rule_b}/occurrences/{today}/complete","POST",{},self.csrf_b)[0],200)
         second_a=build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
-        _,second_login=self.request(second_a,"/api/login","POST",{"email":"api-a@example.invalid","password":"local-api-test-pass"})
+        _,second_login=self.request(second_a,"/api/login","POST",{"email":"api-a@example.invalid","username":"api-a","password":"local-api-test-pass"})
         self.assertTrue(second_login["csrf"])
         delete_path="/api/account/delete"
         self.assertEqual(self.request(self.a,delete_path,"POST",{"password":"local-api-test-pass","confirmation":"SİL"})[0],403)

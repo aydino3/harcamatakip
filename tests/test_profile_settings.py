@@ -81,3 +81,53 @@ class ProfileSettingsTest(unittest.TestCase):
             db.execute('INSERT INTO card_statements(user_id,card_id,period_start,closing_on,due_on) VALUES(?,?,?,?,?)',(self.user,card,'2027-04-01','2027-04-22','2027-05-03'))
         self.assertEqual(profiles.get_profile(self.user)['cards'][0]['payment_due_day'],3)
         with core.connect() as db:self.assertEqual(db.execute('SELECT due_on FROM card_statements WHERE user_id=?',(self.user,)).fetchone()[0],'2027-05-03')
+
+    def test_registration_requires_explicit_username_and_preserves_chosen_name(self):
+        client=webapp.create_app({'TESTING':True,'PRIVATE_BETA':False}).test_client()
+        payload={'email':'chosen-name@example.invalid','password':'synthetic-only-password'}
+        self.assertEqual(client.post('/api/register',json=payload).status_code,400)
+        self.assertEqual(client.post('/api/register',json={**payload,'username':'x'}).status_code,400)
+        self.assertEqual(client.post('/api/register',json={**payload,'username':'Chosen.Name'}).status_code,200)
+        profile=client.get('/api/profile').json
+        self.assertEqual(profile['username'],'chosen.name')
+        self.assertEqual(profile['display_name'],'chosen.name')
+        duplicate=client.post('/api/register',json={**payload,'email':'another-chosen@example.invalid','username':'CHOSEN.NAME'})
+        self.assertEqual(duplicate.status_code,409)
+        self.assertIn('zaten kullanılıyor',duplicate.json['error'])
+        self.assertEqual(client.get('/api/profile').json['id'],profile['id'])
+        with core.connect() as db:self.assertIsNone(db.execute('SELECT id FROM users WHERE email=?',('another-chosen@example.invalid',)).fetchone())
+
+    def test_username_profile_edit_is_owned_atomic_and_case_insensitive(self):
+        profiles.save_name(self.user,{'display_name':'Birinci etiket','username':'reserved_name'})
+        profiles.save_name(self.other,{'display_name':'İkinci etiket','username':'second_name'})
+        with self.assertRaisesRegex(ValueError,'zaten kullanılıyor'):
+            profiles.save_name(self.other,{'display_name':'Kaydedilmemeli','username':'RESERVED_NAME'})
+        self.assertEqual(profiles.get_profile(self.other)['display_name'],'İkinci etiket')
+        self.assertEqual(profiles.get_profile(self.other)['username'],'second_name')
+        profiles.save_name(self.user,{'display_name':'Yeni etiket','username':'Reserved_Name'})
+        self.assertEqual(profiles.get_profile(self.user)['username'],'reserved_name')
+        with self.assertRaises(core._DB_INTEGRITY_ERRORS):
+            with core.connect() as db:db.execute('UPDATE users SET username=? WHERE id=?',('RESERVED_NAME',self.other))
+
+    def test_username_concurrent_claim_has_exactly_one_winner(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        gate=Barrier(2)
+        def claim(index):
+            gate.wait()
+            try:return core.create_user(f'race-{index}@example.invalid','synthetic-only-password',username='Concurrent.Name')
+            except core.UsernameUnavailable:return None
+        with ThreadPoolExecutor(max_workers=2) as pool:results=list(pool.map(claim,(1,2)))
+        self.assertEqual(sum(value is not None for value in results),1)
+        with core.connect() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM users WHERE lower(username)=?',('concurrent.name',)).fetchone()[0],1)
+
+    def test_existing_visible_name_is_reserved_without_renaming_or_financial_changes(self):
+        with core.connect() as db:
+            db.execute('UPDATE users SET display_name=?,username=NULL WHERE id IN (?,?)',('Legacy.Name',self.user,self.other))
+            core._initialize_usernames(db)
+            core._initialize_usernames(db)
+            names=db.execute('SELECT username,display_name FROM users WHERE id IN (?,?) ORDER BY id',(self.user,self.other)).fetchall()
+            self.assertEqual(sum(row['username']=='legacy.name' for row in names),1)
+            self.assertTrue(all(row['display_name']=='Legacy.Name' for row in names))
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM expenses').fetchone()[0],0)
+        with self.assertRaises(core.UsernameUnavailable):core.create_user('legacy-claim@example.invalid','synthetic-only-password',username='LEGACY.NAME')
