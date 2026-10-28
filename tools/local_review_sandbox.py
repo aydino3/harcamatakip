@@ -25,7 +25,7 @@ def run():
     from webapp import create_app
     web=create_app()
     if not resume:
-        user=core.create_user(snapshot['profile']['email'],secrets.token_urlsafe(48))
+        user=core.create_user(snapshot['profile']['email'],secrets.token_urlsafe(48),username=snapshot['profile'].get('username'))
         with core.connect() as db:
             # Remove only defaults just created in this new, empty local test account.
             db.execute('DELETE FROM categories WHERE user_id=?',(user,))
