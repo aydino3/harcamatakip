@@ -24,11 +24,12 @@ async function api(path,settings={}){const response=await fetch(path,{...setting
 function languageToggleMarkup(){const english=i18n?.language==='en';return `<div class="language-switch" data-selected-language="${english?'en':'tr'}" role="group" aria-label="${english?'Language':'Dil'}"><span class="language-thumb" aria-hidden="true"></span><button type="button" data-language="tr" aria-pressed="${!english}" lang="tr">Türkçe</button><button type="button" data-language="en" aria-pressed="${english}" lang="en">English</button></div>`}
 function changePresentationLanguage(next){
  if(!i18n||next===i18n.language||root.getAttribute('aria-busy')==='true'||document.querySelector('form[aria-busy=true],#auth-form button:disabled,[data-card-total] button:disabled'))return;
- const auth=Boolean(document.querySelector('#auth-form'));
+ const auth=Boolean(document.querySelector('#auth-form')),appearance=document.querySelector('.appearance-controls');
  const forms=Array.from(root.querySelectorAll('form')).filter(form=>!form.closest('dialog')).map(form=>({key:form.id||form.dataset.cardTotal,fields:Array.from(form.elements).filter(field=>field.name).map(field=>({name:field.name,value:field.value,checked:field.checked}))}));
  const notices=['success','action-error','profile-error','auth-error'].map(id=>document.getElementById(id)).filter(node=>node?.textContent);
  i18n.setLanguage(next);
  if(auth)authView(authRegister);else if(data)render();
+ if(appearance){document.querySelector('.appearance-controls')?.replaceWith(appearance);const control=appearance.querySelector('.language-switch');control.setAttribute('aria-label',next==='en'?'Language':'Dil');for(const button of control.querySelectorAll('[data-language]'))button.setAttribute('aria-pressed',String(button.dataset.language===next));control.querySelector('.language-thumb').getBoundingClientRect();control.dataset.selectedLanguage=next;}
  for(const saved of forms){const form=Array.from(root.querySelectorAll('form')).find(form=>(form.id||form.dataset.cardTotal)===saved.key);if(!form)continue;for(const field of saved.fields){const input=form.elements.namedItem(field.name);if(!input)continue;input.value=field.value;if(input.type==='checkbox'||input.type==='radio')input.checked=field.checked;}if(form.id==='profile-form')form.elements.display_name.dispatchEvent(new Event('input',{bubbles:true}));if(form.dataset.cardTotal)form.elements.due_day_offset.onchange?.();}
  function translateNotice(node){for(const child of node.childNodes){if(child.nodeType===3)child.textContent=i18n.retranslate(child.textContent);else translateNotice(child)}}
  for(const notice of notices){translateNotice(notice);document.getElementById(notice.id)?.replaceWith(notice);}
