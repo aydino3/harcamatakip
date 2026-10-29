@@ -10,11 +10,12 @@
     document.documentElement.dataset.theme=theme;
     const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=dark?'#0b101b':'#f3f5fb';
     document.querySelectorAll('[data-theme-toggle]').forEach(button=>{
-      const label=dark?'Açık temaya geç':'Koyu temaya geç';
+      const key=dark?'Açık temaya geç':'Koyu temaya geç';const label=window.FinanceI18n?window.FinanceI18n.t(key):key;
       button.setAttribute('aria-label',label);button.setAttribute('title',label);button.setAttribute('aria-pressed',String(dark));
     });
   }
   apply();
+  document.addEventListener('finance-language-change',apply);
   document.addEventListener('click',event=>{
     if(!event.target.closest?.('[data-theme-toggle]'))return;
     preference=document.documentElement.dataset.theme==='dark'?'light':'dark';
