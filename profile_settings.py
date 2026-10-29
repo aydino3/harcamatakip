@@ -60,21 +60,17 @@ def get_profile(user_id):
         setting=next((row for row in settings if (row['legacy_card_id']==int(card['id'].split(':')[1]) if card['id'].startswith('legacy:') else row['id']==int(card['id'].split(':')[1]))),None)
         card['payment_due_day']=card_schedule.due_day({**card,**({'payment_due_day':setting.get('payment_due_day')} if setting else {})})
         card['payment_due_on']=card_schedule.next_due(card,today())
-    return {'id':user['id'],'email':user['email'],'username':user['username'],'display_name':user['display_name'] or user['email'].split('@')[0],'cards':cards}
+    return {'id':user['id'],'email':user['email'],'username':user['username'],'display_name':user['username'],'cards':cards}
 
 
 def save_name(user_id,payload):
-    name=payload.get('display_name','')
-    if not isinstance(name,str) or not 1<=len(name.strip())<=80:
-        raise ValueError('Profil adı 1–80 karakter olmalı.')
-    username=core.normalize_username(payload['username']) if 'username' in payload else None
+    # One account name: legacy display_name input is only an alias, never a second name.
+    username=core.normalize_username(payload.get('username',payload.get('display_name')))
     try:
         with core.connect() as db:
-            if username is not None:
-                if db.execute('SELECT 1 FROM users WHERE lower(username)=? AND id<>?',(username,user_id)).fetchone():
-                    raise core.UsernameUnavailable('Bu kullanıcı adı zaten kullanılıyor. Başka bir ad seç.')
-                db.execute('UPDATE users SET display_name=?,username=? WHERE id=?',(name.strip(),username,user_id))
-            else:db.execute('UPDATE users SET display_name=? WHERE id=?',(name.strip(),user_id))
+            if db.execute('SELECT 1 FROM users WHERE lower(username)=? AND id<>?',(username,user_id)).fetchone():
+                raise core.UsernameUnavailable('Bu kullanıcı adı zaten kullanılıyor. Başka bir ad seç.')
+            db.execute('UPDATE users SET display_name=?,username=? WHERE id=?',(username,username,user_id))
     except core._DB_INTEGRITY_ERRORS as error:
         if core.username_integrity_error(error):raise core.UsernameUnavailable('Bu kullanıcı adı zaten kullanılıyor. Başka bir ad seç.') from error
         raise

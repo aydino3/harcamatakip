@@ -20,9 +20,9 @@ class ProfileSettingsTest(unittest.TestCase):
     def test_current_profile_name_email_and_isolation(self):
         first=profiles.get_profile(self.user)
         self.assertEqual(first['email'],self.email)
-        profiles.save_name(self.user,{'display_name':'Deneme profili'})
-        self.assertEqual(profiles.get_profile(self.user)['display_name'],'Deneme profili')
-        self.assertNotEqual(profiles.get_profile(self.other)['display_name'],'Deneme profili')
+        profiles.save_name(self.user,{'username':'Deneme.Profili'})
+        self.assertEqual(profiles.get_profile(self.user)['display_name'],'deneme.profili')
+        self.assertNotEqual(profiles.get_profile(self.other)['display_name'],'deneme.profili')
 
     def test_legacy_cards_remain_visible_and_specific_due_date_does_not_create_payments(self):
         card=core.save_credit_card(self.user,{'bank_name':'Sentetik banka','display_name':'Eski kart','closing_day':22,'due_day':3})
@@ -63,8 +63,8 @@ class ProfileSettingsTest(unittest.TestCase):
         self.assertEqual(client.get('/api/profile').status_code,401)
         login=client.post('/api/login',json={'email':self.email,'password':'synthetic-only-password'})
         self.assertEqual(client.get('/api/profile').json['email'],self.email)
-        self.assertEqual(client.put('/api/profile',json={'display_name':'Yeni ad'}).status_code,403)
-        self.assertEqual(client.put('/api/profile',json={'display_name':'Yeni ad'},headers={'X-CSRF-Token':login.json['csrf']}).status_code,200)
+        self.assertEqual(client.put('/api/profile',json={'username':'yeni.ad'}).status_code,403)
+        self.assertEqual(client.put('/api/profile',json={'username':'yeni.ad'},headers={'X-CSRF-Token':login.json['csrf']}).status_code,200)
 
     def test_duplicate_card_edit_is_validation_error_and_preserves_both_cards(self):
         base={'bank_name':'Sentetik','payment_due_on':'2027-05-08'}
@@ -102,10 +102,15 @@ class ProfileSettingsTest(unittest.TestCase):
         profiles.save_name(self.other,{'display_name':'İkinci etiket','username':'second_name'})
         with self.assertRaisesRegex(ValueError,'zaten kullanılıyor'):
             profiles.save_name(self.other,{'display_name':'Kaydedilmemeli','username':'RESERVED_NAME'})
-        self.assertEqual(profiles.get_profile(self.other)['display_name'],'İkinci etiket')
+        self.assertEqual(profiles.get_profile(self.other)['display_name'],'second_name')
         self.assertEqual(profiles.get_profile(self.other)['username'],'second_name')
         profiles.save_name(self.user,{'display_name':'Yeni etiket','username':'Reserved_Name'})
         self.assertEqual(profiles.get_profile(self.user)['username'],'reserved_name')
+        self.assertEqual(profiles.get_profile(self.user)['display_name'],'reserved_name')
+        with core.connect() as db:
+            row=db.execute('SELECT display_name,username FROM users WHERE id=?',(self.user,)).fetchone()
+        self.assertEqual(row['display_name'],row['username'])
+        self.assertEqual(core.authenticate('RESERVED_NAME','synthetic-only-password'),self.user)
         with self.assertRaises(core._DB_INTEGRITY_ERRORS):
             with core.connect() as db:db.execute('UPDATE users SET username=? WHERE id=?',('RESERVED_NAME',self.other))
 
