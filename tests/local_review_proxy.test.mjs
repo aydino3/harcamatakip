@@ -18,9 +18,9 @@ test('Yerel çalışma kopyası: sahiplik, CSRF ve canlıya yazmama',async()=>{
   const login=await fetch(instance.url+'/api/login',{method:'POST',headers:{Origin:instance.url,'Content-Type':'application/json'},body:JSON.stringify({email:'local-copy@example.invalid',password:'synthetic-only'})});
   assert.equal(login.status,200);const session=await login.json();const cookie=login.headers.getSetCookie().map(value=>value.split(';')[0]).join('; ');
   const headers={Origin:instance.url,Cookie:cookie,'Content-Type':'application/json','X-CSRF-Token':session.csrf};
-  assert.equal((await fetch(instance.url+'/api/profile',{method:'PUT',headers:{...headers,'X-CSRF-Token':'incorrect'},body:JSON.stringify({display_name:'Engellenmeli'})})).status,403);
-  assert.equal((await fetch(instance.url+'/api/profile',{method:'PUT',headers,body:JSON.stringify({display_name:'Kaydedilen yerel ad'})})).status,200);
-  const savedProfile=(await (await fetch(instance.url+'/api/profile',{headers})).json());assert.equal(savedProfile.display_name,'Kaydedilen yerel ad');assert.equal(savedProfile.username,'local_copy');
+  assert.equal((await fetch(instance.url+'/api/profile',{method:'PUT',headers:{...headers,'X-CSRF-Token':'incorrect'},body:JSON.stringify({username:'engellenmeli'})})).status,403);
+  assert.equal((await fetch(instance.url+'/api/profile',{method:'PUT',headers,body:JSON.stringify({username:'yerel.ad'})})).status,200);
+  const savedProfile=(await (await fetch(instance.url+'/api/profile',{headers})).json());assert.equal(savedProfile.display_name,'yerel.ad');assert.equal(savedProfile.username,'yerel.ad');
   const cash=await (await fetch(instance.url+'/api/simple-cashflow?start=2024-01-01&end=2024-02-28',{headers})).json();assert.equal(cash.local_sandbox,true);assert.equal(cash.net_minor,'-2000');
   const bank={entry_kind:'regular',description:'Haftalık deneme',amount:'25',start_on:'2024-01-02',end_on:'2024-01-23',frequency:'weekly',card_ref:'',request_key:'proxy-bank-key-0001'};
   assert.equal((await fetch(instance.url+'/api/simple-payment-plans',{method:'POST',headers,body:JSON.stringify(bank)})).status,200);
