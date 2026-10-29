@@ -65,14 +65,14 @@ test('Tavsiyeler beşinci sekme: gerçek hesaplamalı nakit açığı, yalıtıl
  await page.goto(url);await page.getByRole('heading',{name:'Gelir ve ödeme takvimi'}).waitFor();
  const writes=[];page.on('request',request=>{if(!['GET','HEAD','OPTIONS'].includes(request.method()))writes.push(request.url())});
  assert.equal(await page.locator('nav a').count(),5);
- await page.locator('nav [data-section=recommendations]').click();await page.getByRole('heading',{name:'Ödeme gününden önce nakit açığı var',exact:true}).waitFor();
- const cash=await(await context.request.get(url+'/api/recommendations?month='+month)).json();assert.equal(cash.cash.first_gap.date,due);assert.equal(cash.cash.first_gap.amount_minor,'10000');assert.equal(cash.cash.ending_minor,'20000');
- await page.locator('#advice-month').fill('2024-02');await page.getByText('Şubat 2024',{exact:true}).first().waitFor();await page.locator('#advice-refresh').click();await page.getByRole('heading',{name:'Ödeme gününden önce nakit açığı var',exact:true}).waitFor();
- await page.locator('[data-language=en]').click();await page.getByRole('heading',{name:'A cash shortfall occurs before a payment',exact:true}).waitFor();
+ await page.locator('nav [data-section=recommendations]').click();await page.getByRole('heading',{name:'Bir ödeme gününde paran yetmiyor',exact:true}).waitFor();
+ await page.getByText('Bu ekranı nasıl okuyacağım?',{exact:true}).click();await page.getByText(/Ay sonunda kalacak para demek değil/).waitFor();await page.locator('[data-advice-code=cash_gap]').getByRole('heading',{name:'Ne yapabilirsin?',exact:true}).waitFor();assert.ok((await page.locator('.advice-metrics').innerText()).includes('100,00 ₺ eksik'));const cash=await(await context.request.get(url+'/api/recommendations?month='+month)).json();assert.equal(cash.cash.first_gap.date,due);assert.equal(cash.cash.first_gap.amount_minor,'10000');assert.equal(cash.cash.ending_minor,'20000');
+ await page.locator('#advice-month').fill('2024-02');await page.getByText('Şubat 2024',{exact:true}).first().waitFor();await page.locator('#advice-refresh').click();await page.getByRole('heading',{name:'Bir ödeme gününde paran yetmiyor',exact:true}).waitFor();
+ await page.locator('[data-language=en]').click();await page.getByRole('heading',{name:'Your money falls short on a payment day',exact:true}).waitFor();
  for(const width of [320,390,768,1440]){await page.setViewportSize({width,height:900});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Tavsiye ekranında yatay taşma: '+width+' '+JSON.stringify(await page.evaluate(()=>Array.from(document.querySelectorAll('main *')).filter(el=>el.getBoundingClientRect().right>innerWidth+1).slice(0,5).map(el=>({tag:el.tagName,class:el.className,text:el.textContent.slice(0,60)})))))}
  await page.locator('[data-language=tr]').click();await page.locator('nav [data-section=overview]').click();assert.equal(await page.locator('#overview-month').inputValue(),month);
  for(const section of ['payments','income','profile']){await page.locator('nav [data-section='+section+']').click();await page.locator('main h1').waitFor()}
- await page.goto(url+'/#recommendations');await page.getByRole('heading',{name:'Ödeme gününden önce nakit açığı var',exact:true}).waitFor();
+ await page.goto(url+'/#recommendations');await page.getByRole('heading',{name:'Bir ödeme gününde paran yetmiyor',exact:true}).waitFor();
  assert.deepEqual(writes,[]);const after=await(await context.request.get(url+range)).json();assert.deepEqual(after,before);
  }finally{await context.close()}
 });
