@@ -28,7 +28,7 @@ class RecommendationsTest(unittest.TestCase):
     def codes(self,result):return {row['code'] for row in result['items']}
 
     def test_empty_account_is_incomplete_not_a_zero_cash_success(self):
-        r=self.analyze();self.assertFalse(r['cash']['available']);self.assertIsNone(r['cash']['balance_minor'])
+        r=self.analyze();self.assertFalse(r['cash']['available']);self.assertFalse(r['cash']['reliable']);self.assertIsNone(r['cash']['balance_minor'])
         self.assertEqual(self.codes(r),{'data_quality'});self.assertIsNone(r['spending']['income_minor'])
         self.assertTrue(all(row['income_minor'] is None and row['capacity_minor'] is None for row in r['future_months']))
 

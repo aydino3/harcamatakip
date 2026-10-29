@@ -91,7 +91,7 @@ def analyze(data, month, as_of=None):
     daily=defaultdict(lambda:{'income':0,'payments':0})
     for row in payments:daily[max(row['date'],as_of.isoformat())]['payments']+=int(row['amount_minor'])
     for row in expected:daily[row['date']]['income']+=int(row['amount_minor'])
-    cash={'available':position['balance_minor'] is not None,'balance_minor':position['balance_minor'],'automatic_income_minor':automatic,'expected_income_minor':sum(int(row['amount_minor']) for row in expected),'pending_payments_minor':sum(int(row['amount_minor']) for row in payments),'overdue_payments_minor':sum(int(row['amount_minor']) for row in overdue),'reliable':not blocked and not history_limited and not future_missing,'blocked':blocked,'timeline':[],'minimum_minor':None,'without_income_minimum_minor':None,'first_gap':None,'without_income_first_gap':None}
+    cash={'available':position['balance_minor'] is not None,'balance_minor':position['balance_minor'],'automatic_income_minor':automatic,'expected_income_minor':sum(int(row['amount_minor']) for row in expected),'pending_payments_minor':sum(int(row['amount_minor']) for row in payments),'overdue_payments_minor':sum(int(row['amount_minor']) for row in overdue),'reliable':position['balance_minor'] is not None and not blocked and not history_limited and not future_missing,'blocked':blocked,'timeline':[],'minimum_minor':None,'without_income_minimum_minor':None,'first_gap':None,'without_income_first_gap':None}
     if cash['available']:
         balance=int(position['balance_minor']);without=balance;minimum=balance;minimum_without=balance
         first_gap={'date':as_of.isoformat(),'amount_minor':-balance} if balance<0 else None
