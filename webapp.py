@@ -291,6 +291,15 @@ def create_app(test_config: dict | None = None) -> Flask:
         except (ValueError,TypeError,OverflowError):
             return json_error("Ödeme bilgilerini kontrol edin. Taksit zaten ödenmiş olabilir; tutar kalan borcu aşmamalı, gerçek ödeme tarihi gelecekte olmamalı.",400)
 
+    @web.get("/api/recommendations")
+    def recommendations_route():
+        session,error=auth()
+        if error:return error
+        import recommendations
+        from simple_cashflow import today
+        try:return jsonify(recommendations.for_user(session['user_id'],request.args.get('month',today().strftime('%Y-%m'))))
+        except (ValueError,TypeError,OverflowError):return json_error('Tavsiye ayını kontrol edin.',400)
+
     @web.get("/api/simple-cashflow")
     def simple_cashflow_route():
         session,error=auth()
