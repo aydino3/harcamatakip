@@ -346,3 +346,9 @@ Opening balance is the balance at the start of its effective day. Actual payment
 ## Display language
 
 The sliding Türkçe / English selector is available on the sign-in screen and in the app header. Turkish is the default; the browser remembers an explicit choice in `finance.language`. Localization lives in `static/locale.js`. Dates and monetary display follow the selected language, while TRY currency, integer minor units, ISO request dates, Istanbul scheduling, and server-side financial rules remain unchanged. Descriptions, profile names, and card names are not translated. Switching language preserves unsaved main-form values and does not submit financial requests. Language switching is deferred while a request is busy; open modal dialogs keep focus and prevent clicks on the background controls.
+
+## Statement closing month versus payment month
+
+Profile and Settings supports a statement closing day (1–31) independently of the payment due day. It is used only by Overview's card-spending report. If the nominal due day is on/before the closing day, that statement is paid in the next month; otherwise it is paid in the same month. Short months clamp displayed closing dates, while ±5-day payment adjustments never change the reporting cycle. Known legacy statements retain their recorded closing dates. A missing closing day is shown as incomplete instead of guessed.
+
+My Payments continues to manage statement totals, installments, actual payments, and adjustments by payment month. No existing statement totals, payment keys, actual payment dates, or bank movements are moved when a closing day is edited. Overview compares the closing month's card installments/additional spending and scheduled bank payments with that month's income; its spending report is distinct from the cash payment calendar and bank balance.

@@ -34,3 +34,32 @@ def next_due(card,on):
         year,zero_month=divmod(index,12)
         result=due_on(card,f'{year:04}-{zero_month+1:02}')
     return result
+
+
+def closing_day(card):
+    value=card.get('statement_closing_day')
+    if value is None:value=card.get('closing_day')
+    if value is None:return None
+    if isinstance(value,bool) or not isinstance(value,int) or not 1<=value<=31:
+        raise ValueError('Ekstre kesim günü 1–31 arasında olmalı.')
+    return value
+
+
+def shift_month(month,offset):
+    first=date.fromisoformat(month+'-01')
+    year,zero_month=divmod(first.year*12+first.month-1+offset,12)
+    return f'{year:04}-{zero_month+1:02}'
+
+
+def closing_on(card,month):
+    day=closing_day(card)
+    if day is None:return None
+    first=date.fromisoformat(month+'-01')
+    return first.replace(day=min(day,calendar.monthrange(first.year,first.month)[1])).isoformat()
+
+
+def payment_month_for_closing(card,month):
+    """Reporting cycle only: nominal day ordering stays stable in short months and ±5 offsets."""
+    cut=closing_day(card)
+    if cut is None:return None
+    return shift_month(month,1) if due_day(card)<=cut else month

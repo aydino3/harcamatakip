@@ -131,3 +131,28 @@ class ProfileSettingsTest(unittest.TestCase):
             self.assertTrue(all(row['display_name']=='Legacy.Name' for row in names))
             self.assertEqual(db.execute('SELECT COUNT(*) FROM expenses').fetchone()[0],0)
         with self.assertRaises(core.UsernameUnavailable):core.create_user('legacy-claim@example.invalid','synthetic-only-password',username='LEGACY.NAME')
+
+    def test_closing_day_edit_preserves_every_due_setting_and_legacy_cutoff(self):
+        card=profiles.save_card(self.user,{'bank_name':'Kesim banka','display_name':'Kesim kart','payment_due_day':6,'statement_closing_day':26})['id']
+        before=profiles.get_profile(self.user)['cards'][0]
+        with core.connect() as db:stored=dict(db.execute('SELECT * FROM profile_cards WHERE user_id=?',(self.user,)).fetchone())
+        profiles.save_card(self.user,{**before,'statement_closing_day':27})
+        after=profiles.get_profile(self.user)['cards'][0]
+        with core.connect() as db:changed=dict(db.execute('SELECT * FROM profile_cards WHERE user_id=?',(self.user,)).fetchone())
+        self.assertEqual(after['statement_closing_day'],27)
+        self.assertEqual({k:v for k,v in stored.items() if k not in ('statement_closing_day','version')},{k:v for k,v in changed.items() if k not in ('statement_closing_day','version')})
+        with self.assertRaises(ValueError):profiles.save_card(self.user,{**before,'statement_closing_day':28})
+        old=core.save_credit_card(self.user,{'bank_name':'Eski kesim','display_name':'Eski','closing_day':22,'due_day':6})
+        legacy=next(row for row in profiles.get_profile(self.user)['cards'] if row['id']==f'legacy:{old}')
+        profiles.save_card(self.user,{**legacy,'statement_closing_day':26})
+        with core.connect() as db:self.assertEqual(db.execute('SELECT closing_day,due_day FROM credit_cards WHERE id=?',(old,)).fetchone()[0],22)
+
+    def test_closing_day_validation_ownership_and_old_clients_preserve_reporting_day(self):
+        payload={'bank_name':'Kesim','display_name':'Kart','payment_due_day':6,'statement_closing_day':26}
+        for value in (0,32,True,2.5,'abc','-1'):
+            with self.assertRaises(ValueError):profiles.save_card(self.user,{**payload,'statement_closing_day':value})
+        card=profiles.save_card(self.user,payload)['id'];row=profiles.get_profile(self.user)['cards'][0]
+        with self.assertRaises(ValueError):profiles.save_card(self.other,{**row,'statement_closing_day':20})
+        old_client={k:v for k,v in row.items() if k!='statement_closing_day'}
+        profiles.save_card(self.user,{**old_client,'display_name':'Eski istemci değişikliği'})
+        self.assertEqual(profiles.get_profile(self.user)['cards'][0]['statement_closing_day'],26)

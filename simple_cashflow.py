@@ -197,6 +197,7 @@ def overview(user_id,start_value,end_value):
     result['card_spending']=card_spending(data,start_value,end_value)
     result['extra_budget']=extra_budget(data,result,start_value,end_value)
     result['card_monthly_debt']=monthly_card_debt(data,start_value[:7])
+    result['card_statement_spending']=card_statement_spending(data,start_value[:7])
     covered={(row['card_ref'],row['month']) for row in data.get('card_monthly_totals',[])}
     result['statements']=[{**row,'covered_by_monthly_total':('legacy:'+str(row['card_id']),row['payment_month']) in covered,**{k:str(row[k]) for k in ('total_minor','paid_minor','remaining_minor')}} for row in statement_balances(data)]
     result["net_minor"]=str(result["net_minor"])
@@ -657,7 +658,7 @@ def legacy_entry_kind(rule,methods):
     return 'regular' if method in ('nakit','banka kartı') else 'installment'
 
 
-def card_spending(data,start_value,end_value):
+def card_spending(data,start_value,end_value,include_inactive=False):
     """Purchase-month extras by owned card, independent of settlement cashflow."""
     groups={}
     for card in data.get('cards',[]):
@@ -681,7 +682,7 @@ def card_spending(data,start_value,end_value):
     for group in groups.values():
         group['entries'].sort(key=lambda row:(row['purchased_on'],row['id']))
         group['count']=len(group['entries']);group['total_minor']=str(sum(int(row['amount_minor']) for row in group['entries']))
-        if group['active'] or group['count']:cards.append(group)
+        if group['active'] or group['count'] or include_inactive:cards.append(group)
     cards.sort(key=lambda row:(row['bank_name'].casefold(),row['display_name'].casefold()))
     return {'cards':cards,'total_minor':str(sum(int(row['total_minor']) for row in cards)),'count':sum(row['count'] for row in cards),'start_on':start_value,'end_on':end_value}
 
@@ -702,9 +703,11 @@ def extra_budget(data,view,start_value,end_value):
 def monthly_card_debt(data,month):
     from calendar import monthrange
     first=date.fromisoformat(month+'-01');last=first.replace(day=monthrange(first.year,first.month)[1])
-    cards=card_spending(data,first.isoformat(),last.isoformat())['cards']
+    all_cards=card_spending(data,first.isoformat(),last.isoformat(),include_inactive=True)['cards']
     saved={row['card_ref']:row for row in data.get('card_monthly_totals',[]) if row['month']==month}
     statements=statement_balances(data)
+    known_refs={'legacy:'+str(row['card_id']) for row in statements if row.get('payment_month',row['due_on'][:7])==month}
+    cards=[row for row in all_cards if row['active'] or row['count'] or row['card_ref'] in saved or row['card_ref'] in known_refs]
     unassigned=[]
     fixed={card['card_ref']:{'installment_minor':0,'regular_minor':0} for card in cards}
     for rule in data.get('recurring',[]):
@@ -728,6 +731,47 @@ def monthly_card_debt(data,month):
         parts=fixed[ref];extra=gross-sum(parts.values()) if gross is not None else None
         rows.append({'card_ref':ref,'bank_name':card['bank_name'],'display_name':card['display_name'],'version':manual['version'] if manual else 0,'source_month':manual['month'] if manual else month,'configured_due_on':configured_card_due(data,ref,month),'payment_due_day':card_schedule.due_day(configured_card(data,ref)),'due_day_offset':monthly_due_offset(data,manual) if manual else 0,'due_date_explicit':manual.get('due_date_explicit',0) if manual else 0,'due_on':balances.get((ref,month),{}).get('due_on') or configured_card_due(data,ref,month),'remaining_minor':str(balances[(ref,month)]['remaining_minor']) if (ref,month) in balances else None,'source':'entered' if manual else 'statement' if known else 'missing','total_minor':str(gross) if gross is not None else None,**{key:str(value) for key,value in parts.items()},'extra_minor':str(extra) if extra is not None and extra>=0 else None,'inconsistent':extra is not None and extra<0})
     return {'month':month,'cards':rows,'unassigned_installments':unassigned,'extra_minor':str(sum(int(row['extra_minor']) for row in rows if row['extra_minor'] is not None)),'complete':all(row['total_minor'] is not None and not row['inconsistent'] for row in rows) and not unassigned}
+
+
+def card_statement_spending(data,month):
+    """Accrual view by closing month; monthly_card_debt remains keyed by payment month."""
+    from calendar import monthrange
+    first=date.fromisoformat(month+'-01');last=first.replace(day=monthrange(first.year,first.month)[1])
+    cache={}
+    def debts(payment_month):
+        if payment_month not in cache:cache[payment_month]=monthly_card_debt(data,payment_month)
+        return cache[payment_month]
+    # Current cards plus any historical card whose statement closes in this month.
+    inventory={row['card_ref']:row for row in card_spending(data,first.isoformat(),last.isoformat())['cards']}
+    for key,kind in (('cards','legacy'),('profile_cards','card')):
+        for card in data.get(key,[]):
+            if kind=='card' and card.get('legacy_card_id') is not None:continue
+            ref=kind+':'+str(card['id'])
+            relevant_months=(month,card_schedule.shift_month(month,1))
+            if any(row['card_ref']==ref and row['month'] in relevant_months for row in data.get('card_monthly_totals',[])) or any(ref=='legacy:'+str(row['card_id']) and row['closing_on'][:7]==month for row in data.get('statements',[])):
+                inventory.setdefault(ref,{'card_ref':ref,'bank_name':card['bank_name'],'display_name':card['display_name']})
+    rows=[]
+    for ref,card in inventory.items():
+        setting=configured_card(data,ref)
+        payment_month=card_schedule.payment_month_for_closing(setting,month)
+        cut=card_schedule.closing_on(setting,month)
+        actual=[row for row in data.get('statements',[]) if ref=='legacy:'+str(row['card_id']) and row['closing_on'][:7]==month]
+        actual_months={row['due_on'][:7] for row in actual}
+        if len(actual_months)==1:
+            payment_month=next(iter(actual_months));cut=max(row['closing_on'] for row in actual)
+        source=next((row for row in debts(payment_month)['cards'] if row['card_ref']==ref),None) if payment_month else None
+        row={**card,'payment_month':payment_month,'closing_on':cut,'statement_closing_day':card_schedule.closing_day(setting),'due_on':None,'total_minor':None,'extra_minor':None,'installment_minor':'0','regular_minor':'0','inconsistent':False,'missing_closing_day':payment_month is None}
+        if source:row.update(source)
+        if len(actual_months)>1:row.update(total_minor=None,extra_minor=None,inconsistent=True)
+        rows.append(row)
+    unassigned={row['id']:row for candidate in (month,card_schedule.shift_month(month,1)) for row in debts(candidate)['unassigned_installments']}
+    bank_fixed=sum(int(rule['amount_minor']) for rule in data.get('recurring',[]) if rule['status']=='active' and rule.get('entry_kind')=='regular' and not rule.get('card_ref') for _ in payment_dates(rule,first,last))
+    card_fixed=sum(int(row['installment_minor'])+int(row['regular_minor']) for row in rows)
+    view=calculate(data,first.isoformat(),last.isoformat())
+    income=int(view['totals']['income_received_minor'])+int(view['totals']['income_expected_minor'])
+    known_total=sum(int(row['total_minor']) for row in rows if row['total_minor'] is not None)
+    extras=sum(int(row['extra_minor']) for row in rows if row['extra_minor'] is not None)
+    return {'month':month,'basis':'statement_closing_month','cards':rows,'unassigned_installments':list(unassigned.values()),'total_minor':str(known_total),'installment_minor':str(sum(int(row['installment_minor']) for row in rows)),'regular_minor':str(sum(int(row['regular_minor']) for row in rows)),'extra_minor':str(extras),'complete':all(row['extra_minor'] is not None and not row['inconsistent'] for row in rows) and not unassigned,'budget':{'income_minor':str(income),'fixed_minor':str(bank_fixed+card_fixed),'bank_fixed_minor':str(bank_fixed),'allowance_minor':str(max(0,income-bank_fixed-card_fixed)) if all(not row['missing_closing_day'] and not row['inconsistent'] for row in rows) and not unassigned else None}}
 
 
 def save_card_monthly_total(user_id,payload):

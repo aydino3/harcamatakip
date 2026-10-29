@@ -711,3 +711,78 @@ class SimpleCashflowTest(unittest.TestCase):
         data=finance.read_data(self.user)
         self.assertEqual(finance.cash_position(data,date(2024,1,3))['balance_minor'],'60000')
         self.assertEqual(finance.projected_balance(data,'2024-01-31',date(2024,1,3)),60000)
+
+    def test_statement_closing_month_combines_different_payment_months_without_cash_changes(self):
+        young=self.card(display_name='Genç',payment_due_day=6,statement_closing_day=26)
+        trink=self.card(display_name='Trink',payment_due_day=26,statement_closing_day=16)
+        self.plan(card_ref=young,entry_kind='installment',start_on='2024-11-06',end_on='2024-11-06',request_key='closing-young-plan-01')
+        self.plan(card_ref=trink,entry_kind='installment',amount='50',start_on='2024-10-26',end_on='2024-10-26',request_key='closing-trink-plan-01')
+        self.plan(entry_kind='regular',amount='100',start_on='2024-10-31',end_on='2024-10-31',request_key='closing-bank-plan-001')
+        finance.save_income_once(self.user,{'description':'Ekim gelir','amount':'1000','expected_on':'2024-10-01','status':'expected','request_key':'closing-income-00001'})
+        finance.save_opening(self.user,{'amount':'1000','effective_on':'2024-10-01'})
+        for ref,month,amount in ((young,'2024-11','300'),(trink,'2024-10','200')):
+            finance.save_card_monthly_total(self.user,{'card_ref':ref,'month':month,'amount':amount,'version':0})
+        before=finance.read_data(self.user)
+        report=finance.card_statement_spending(before,'2024-10')
+        self.assertTrue(report['complete']);self.assertEqual(report['total_minor'],'50000');self.assertEqual(report['installment_minor'],'15000');self.assertEqual(report['extra_minor'],'35000')
+        self.assertEqual(report['budget'],{'income_minor':'100000','fixed_minor':'25000','bank_fixed_minor':'10000','allowance_minor':'75000'})
+        by_ref={r['card_ref']:r for r in report['cards']}
+        self.assertEqual((by_ref[young]['closing_on'],by_ref[young]['due_on'],by_ref[young]['payment_month']),('2024-10-26','2024-11-06','2024-11'))
+        self.assertEqual((by_ref[trink]['closing_on'],by_ref[trink]['due_on'],by_ref[trink]['payment_month']),('2024-10-16','2024-10-26','2024-10'))
+        self.assertEqual(finance.calculate(before,'2024-10-01','2024-10-31')['totals']['payments_planned_minor'],30000)
+        finance.record_card_monthly_payment(self.user,{'card_ref':trink,'month':'2024-10','amount':'200','paid_on':'2024-10-26','request_key':'closing-paid-trink-01'})
+        after=finance.read_data(self.user)
+        self.assertEqual(finance.cash_position(after,date(2024,10,29))['balance_minor'],'80000')
+        self.assertEqual(finance.card_statement_spending(after,'2024-10')['extra_minor'],'35000')
+
+    def test_closing_day_change_reclassifies_spending_only_and_keeps_payment_and_bank_events(self):
+        import profile_settings
+        card=self.card(payment_due_day=20,statement_closing_day=16)
+        finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2024-11','amount':'300','version':0})
+        before=finance.read_data(self.user);cash=finance.cash_position(before,date(2024,11,30));events=finance.calculate(before,'2024-10-01','2024-12-31')
+        self.assertEqual(finance.card_statement_spending(before,'2024-11')['total_minor'],'30000')
+        row=profile_settings.get_profile(self.user)['cards'][0];profile_settings.save_card(self.user,{**row,'statement_closing_day':26})
+        after=finance.read_data(self.user)
+        self.assertEqual(finance.card_statement_spending(after,'2024-10')['total_minor'],'30000')
+        self.assertEqual(finance.calculate(after,'2024-10-01','2024-12-31'),events)
+        self.assertEqual(finance.cash_position(after,date(2024,11,30)),cash)
+        self.assertEqual(before['card_monthly_totals'],after['card_monthly_totals'])
+
+    def test_closing_cycle_year_leap_and_offsets_keep_nominal_payment_month_identity(self):
+        import card_schedule
+        for month,cut,due,expected_payment,expected_close in [('2024-12',26,6,'2025-01','2024-12-26'),('2024-02',31,6,'2024-03','2024-02-29'),('2023-02',30,31,'2023-02','2023-02-28'),('2024-02',30,31,'2024-02','2024-02-29'),('2024-01',6,6,'2024-02','2024-01-06')]:
+            card={'statement_closing_day':cut,'payment_due_day':due}
+            self.assertEqual(card_schedule.payment_month_for_closing(card,month),expected_payment)
+            self.assertEqual(card_schedule.closing_on(card,month),expected_close)
+        card=self.card(payment_due_day=2,statement_closing_day=26)
+        finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2024-11','amount':'300','due_day_offset':-5,'version':0})
+        row=finance.card_statement_spending(finance.read_data(self.user),'2024-10')['cards'][0]
+        self.assertEqual((row['payment_month'],row['closing_on'],row['due_on']),('2024-11','2024-10-26','2024-10-28'))
+
+    def test_missing_closing_day_never_guesses_spending_month_or_total(self):
+        card=self.card(payment_due_day=6)
+        finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2024-11','amount':'300','version':0})
+        report=finance.card_statement_spending(finance.read_data(self.user),'2024-10')
+        self.assertFalse(report['complete']);self.assertTrue(report['cards'][0]['missing_closing_day']);self.assertIsNone(report['cards'][0]['extra_minor'])
+
+    def test_paid_inactive_card_history_remains_in_closing_report_and_other_users_are_excluded(self):
+        import profile_settings
+        card=self.card(payment_due_day=6,statement_closing_day=26)
+        self.card(owner=self.other,display_name='Başka hesap',payment_due_day=6,statement_closing_day=26)
+        finance.save_card_monthly_total(self.user,{'card_ref':card,'month':'2024-11','amount':'300','version':0})
+        row=profile_settings.get_profile(self.user)['cards'][0];profile_settings.save_card(self.user,{**row,'active':0})
+        report=finance.card_statement_spending(finance.read_data(self.user),'2024-10')
+        self.assertEqual(len(report['cards']),1);self.assertEqual(report['total_minor'],'30000');self.assertTrue(report['complete'])
+
+    def test_recorded_legacy_statement_closing_date_overrides_the_current_day_setting(self):
+        legacy=core.save_credit_card(self.user,{'bank_name':'Eski banka','display_name':'Eski ekstre','closing_day':22,'due_day':6})
+        with core.connect() as db:
+            db.execute('INSERT INTO card_statements(user_id,card_id,period_start,closing_on,due_on) VALUES(?,?,?,?,?)',(self.user,legacy,'2024-10-01','2024-10-28','2024-11-06'))
+        before=finance.read_data(self.user)
+        row=finance.card_statement_spending(before,'2024-10')['cards'][0]
+        self.assertEqual((row['closing_on'],row['payment_month']),('2024-10-28','2024-11'))
+        self.assertEqual(before,finance.read_data(self.user))
+        with core.connect() as db:
+            db.execute('INSERT INTO card_statements(user_id,card_id,period_start,closing_on,due_on) VALUES(?,?,?,?,?)',(self.user,legacy,'2024-10-02','2024-10-29','2024-10-30'))
+        report=finance.card_statement_spending(finance.read_data(self.user),'2024-10')
+        self.assertFalse(report['complete']);self.assertTrue(report['cards'][0]['inconsistent']);self.assertIsNone(report['cards'][0]['extra_minor'])

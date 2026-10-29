@@ -515,3 +515,11 @@ html[data-theme=light] .theme-toggle{background:linear-gradient(135deg,#f6f3fd,#
 html[data-theme=light] .language-thumb{background:#58429e}
 @media(max-width:600px){.appearance-controls{gap:8px}.language-switch button{min-width:70px;min-height:44px}.content header>.appearance-controls{margin-left:auto}}
 @media(prefers-reduced-motion:reduce){.language-thumb{transition:none}}
+
+.statement-spending-card{border:1px solid var(--line);border-radius:16px;padding:20px;margin:14px 0;background:var(--surface-raised);min-width:0}
+.statement-spending-card h3{margin-top:0;overflow-wrap:anywhere}
+.statement-spending-card small{display:block;color:var(--muted);line-height:1.65}
+.statement-report-breakdown{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;border-top:1px solid var(--line);padding-top:16px;margin-top:8px}
+.statement-report-breakdown span{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted)}
+.statement-report-breakdown b{font-size:18px;color:var(--ink);font-variant-numeric:tabular-nums}
+@media(max-width:600px){.statement-report-breakdown{grid-template-columns:minmax(0,1fr);gap:12px}.statement-spending-card{padding:16px}}
