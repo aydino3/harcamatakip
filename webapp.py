@@ -514,7 +514,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             return json_error("Geçersiz istek.", 400)
         scope = "register" if path.endswith("register") else "login"
         address = client_key()
-        identity = data.get("email", "")
+        identity = data.get("email", "") if scope == "register" else data.get("identifier", data.get("email", data.get("username", "")))
         if core.reserve_auth_attempt(address, scope) or core.reserve_auth_attempt(address, scope, identity):
             return json_error("Çok sayıda deneme yapıldı. Lütfen bir süre sonra tekrar deneyin.", 429)
         if scope == "register":
@@ -537,9 +537,9 @@ def create_app(test_config: dict | None = None) -> Flask:
             core.clear_auth_failures(address, scope)
             core.clear_auth_failures(address, scope, identity)
         else:
-            user_id = core.authenticate(data.get("email", ""), data.get("password", ""))
+            user_id = core.authenticate(identity, data.get("password", ""))
             if not user_id:
-                return json_error("E-posta veya parola hatalı.", 401)
+                return json_error("Kullanıcı adı, e-posta veya parola hatalı.", 401)
             core.clear_auth_failures(address, scope)
             core.clear_auth_failures(address, scope, identity)
         token, csrf_token = core.create_session(user_id)

@@ -1054,12 +1054,16 @@ def create_user(email: str, password: str, invitation_token=None, require_invita
 
 
 def authenticate(email: str, password: str):
+    """Accept an email or username, retaining legacy positional/keyword callers."""
     if not isinstance(email, str) or not isinstance(password, str):
         return None
     if len(email) > 254 or len(password) > 256:
         return None
+    identifier = email.strip().lower()
     with connect() as db:
-        row = db.execute("SELECT * FROM users WHERE email=?", (email.strip().lower(),)).fetchone()
+        candidates = db.execute("SELECT * FROM users WHERE email=? OR lower(username)=? LIMIT 2", (identifier, identifier)).fetchall()
+    # Usernames cannot contain @; reject ambiguous legacy data instead of guessing.
+    row = candidates[0] if len(candidates) == 1 else None
     salt = row["password_salt"] if row else DUMMY_PASSWORD_SALT
     expected = row["password_hash"] if row else DUMMY_PASSWORD_HASH
     matches = hmac.compare_digest(password_digest(password, salt), expected)

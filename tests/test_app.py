@@ -303,6 +303,21 @@ class AppTest(unittest.TestCase):
             db.execute("UPDATE auth_sessions_v2 SET expires_at=datetime('now','-1 second') WHERE token_hash=?",(app.hashlib.sha256(second_token.encode()).hexdigest(),))
         self.assertIsNone(app.session_user(second_token))
 
+    def test_email_or_username_login_is_normalized_and_does_not_guess_accounts(self):
+        owner=app.create_user("different-address@example.invalid","owner-password-123",username="Mixed.User")
+        other=app.create_user("other-address@example.invalid","other-password-123",username="other.user")
+        for identity in ("mixed.user"," MIXED.USER "," DIFFERENT-ADDRESS@EXAMPLE.INVALID "):
+            self.assertEqual(app.authenticate(identity,"owner-password-123"),owner)
+        self.assertEqual(app.authenticate("other.user","other-password-123"),other)
+        for identity in ("other.user","different-address","missing.user","' OR 1=1 --"):
+            self.assertIsNone(app.authenticate(identity,"owner-password-123"))
+        with patch.object(app,"password_digest",wraps=app.password_digest) as digest:
+            self.assertIsNone(app.authenticate("missing.user","wrong-password"));digest.assert_called_once()
+        self.assertIsNone(app.authenticate(None,"owner-password-123"))
+        with app.connect() as db:
+            db.execute("UPDATE users SET username=? WHERE id=?",("different-address@example.invalid",other))
+        self.assertIsNone(app.authenticate("different-address@example.invalid","owner-password-123"))
+
     def test_unknown_and_known_failed_logins_both_run_password_hashing(self):
         with patch.object(app,"password_digest",wraps=app.password_digest) as digest:
             self.assertIsNone(app.authenticate("missing@example.invalid","wrong-password"))
@@ -1068,7 +1083,7 @@ class HttpApiTest(unittest.TestCase):
         self.assertIn("bir süre",unknown["error"])
         code,known_wrong=self.request(self.a,"/api/login","POST",{"email":"api-a@example.invalid","password":"wrong"})
         self.assertEqual(code,401)
-        self.assertEqual(known_wrong["error"],"E-posta veya parola hatalı.")
+        self.assertEqual(known_wrong["error"],"Kullanıcı adı, e-posta veya parola hatalı.")
         self.assertEqual(unknown["error"],"Çok sayıda deneme yapıldı. Lütfen bir süre sonra tekrar deneyin.")
         normal_login=self.request(self.a,"/api/login","POST",{"email":"api-a@example.invalid","username":"api-a","password":"local-api-test-pass"})
         self.assertEqual(normal_login[0],200)
@@ -1076,6 +1091,19 @@ class HttpApiTest(unittest.TestCase):
         login=other_client.post("/api/login",json={"email":"api-a@example.invalid","username":"api-a","password":"local-api-test-pass"},environ_base={"REMOTE_ADDR":"198.51.100.10"})
         self.assertEqual(login.status_code,200)
         self.assertTrue(login.get_json()["csrf"])
+
+    def test_login_identifier_username_and_legacy_email_share_account_and_errors(self):
+        client=self.flask_app.test_client()
+        responses=[client.post("/api/login",json={field:value,"password":"local-api-test-pass"}) for field,value in (("identifier"," API-A "),("email","api-a@example.invalid"),("username","api-a"))]
+        self.assertTrue(all(r.status_code==200 for r in responses))
+        self.assertEqual(len({r.get_json()["user_id"] for r in responses}),1)
+        known=client.post("/api/login",json={"identifier":"api-a","password":"wrong"})
+        unknown=client.post("/api/login",json={"identifier":"missing-user","password":"wrong"})
+        self.assertEqual((known.status_code,known.get_json()),(unknown.status_code,unknown.get_json()))
+        for attempt in range(app.AUTH_FAILURE_LIMITS["login"]):
+            response=client.post("/api/login",json={"identifier":" THROTTLED-NAME ","password":"wrong"})
+            self.assertEqual(response.status_code,401)
+        self.assertEqual(client.post("/api/login",json={"identifier":"throttled-name","password":"wrong"}).status_code,429)
 
     def test_login_errors_do_not_disclose_whether_email_exists(self):
         unknown=self.request(self.a,"/api/login","POST",{"email":"missing@example.invalid","password":"wrong-password"})

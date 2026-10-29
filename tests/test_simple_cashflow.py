@@ -20,6 +20,13 @@ class SimpleCashflowTest(unittest.TestCase):
         self.user=core.create_user("cashflow-fixture@example.invalid","synthetic-only-password")
         self.other=core.create_user("other-cashflow@example.invalid","synthetic-only-password")
 
+    def test_username_and_email_authenticate_the_same_owner_on_this_database(self):
+        owner=core.create_user("postgres-auth@example.invalid","synthetic-auth-password",username="Database.Owner")
+        for identifier in ("database.owner"," DATABASE.OWNER ","POSTGRES-AUTH@EXAMPLE.INVALID"):
+            self.assertEqual(core.authenticate(identifier,"synthetic-auth-password"),owner)
+        self.assertIsNone(core.authenticate("database.owner","wrong-password"))
+        self.assertIsNone(core.authenticate("' OR 1=1 --","synthetic-auth-password"))
+
     def plan(self,**changes):
         return finance.save_payment_plan(self.user,{"description":"Sentetik taksit","amount":"100.00","start_on":"2024-01-09","end_on":"2024-03-08","frequency":"monthly","request_key":"plan-create-key-0001",**changes})["id"]
 
