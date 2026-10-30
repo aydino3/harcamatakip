@@ -55,9 +55,10 @@ class PrivacyNoticeTest(unittest.TestCase):
             'password': 'synthetic-password', 'privacy_acknowledgment': proof})
 
     def test_disabled_gate_preserves_existing_login(self):
+        core.create_user('disabled@example.invalid', 'synthetic-password', username='disabled.fixture')
         client = webapp.create_app({'TESTING': True, 'PRIVATE_BETA': False, 'PRIVACY_NOTICE': None}).test_client()
         self.assertEqual(client.get('/api/privacy-notice').get_json(), {'enabled': False})
-        self.assertEqual(client.post('/api/login', json={'identifier': 'fixture@example.invalid', 'password': 'synthetic-password'}).status_code, 200)
+        self.assertEqual(client.post('/api/login', json={'identifier': 'disabled.fixture', 'password': 'synthetic-password'}).status_code, 200)
 
     def test_public_document_contains_exact_hashed_text_but_no_account_records(self):
         self.setup_web()
