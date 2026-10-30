@@ -1016,7 +1016,7 @@ def _initialize_usernames(db):
             db.execute('UPDATE users SET username=? WHERE id=? AND username IS NULL',(name,ids[0]))
 
 
-def create_user(email: str, password: str, invitation_token=None, require_invitation=None, username=None) -> int:
+def create_user(email: str, password: str, invitation_token=None, require_invitation=None, username=None, privacy_ack=None) -> int:
     if not isinstance(email, str) or not isinstance(password, str):
         raise ValueError("invalid credentials")
     email = email.strip().lower()
@@ -1050,6 +1050,9 @@ def create_user(email: str, password: str, invitation_token=None, require_invita
             consumed = db.execute("UPDATE invitations SET used_at=CURRENT_TIMESTAMP WHERE id=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>?", (invitation["id"], datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
             if consumed.rowcount != 1:
                 raise InvalidInvitation("invalid invitation")
+        if privacy_ack is not None:
+            from privacy_notice import record_acknowledgment
+            record_acknowledgment(db, user_id, privacy_ack)
         return user_id
 
 
@@ -1072,13 +1075,16 @@ def authenticate(email: str, password: str):
     return row["id"]
 
 
-def create_session(user_id: int):
+def create_session(user_id: int, privacy_ack=None):
     token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with connect() as db:
         expires_at = (datetime.utcnow() + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
         db.execute("INSERT INTO auth_sessions_v2(token_hash,user_id,csrf_token,expires_at) VALUES(?,?,?,?) RETURNING token_hash",
                    (token_hash, user_id, csrf, expires_at))
+        if privacy_ack is not None:
+            from privacy_notice import record_acknowledgment
+            record_acknowledgment(db, user_id, privacy_ack, token_hash)
     return token, csrf
 
 

@@ -1,0 +1,80 @@
+{
+  "publication_ready": false,
+  "version": "2026-10-30-draft-1",
+  "controller": {
+    "name": "Aydın Özkan",
+    "email": "aydino1996@gmail.com"
+  },
+  "languages": {
+    "tr": {
+      "title": "KVKK Aydınlatma Metni — Yerel Taslak",
+      "sections": [
+        {
+          "key": "controller",
+          "title": "Veri sorumlusu ve iletişim",
+          "text": "Bu uygulamada kişisel verilerin işlenmesinden sorumlu kişi Aydın Özkan’dır. Kişisel verilerinle ilgili başvurularını aydino1996@gmail.com adresine iletebilirsin."
+        },
+        {
+          "key": "data_and_purposes",
+          "title": "Hangi bilgiler, ne için kullanılıyor?",
+          "text": "Hesabını oluşturmak ve korumak için kullanıcı adı, e-posta adresi ve parolanın geri okunamayan özeti işlenir. Kendin girdiğin veya içe aktardığın gelirler, giderler, tutarlar, tarihler, banka/kart adları, varsa kartın son dört hanesi ve ödeme planları; bütçe, bakiye ve öneri ekranlarını hazırlamak için kullanılır. Bankana bağlanılmaz. Tam kart numaranı, CVV kodunu veya banka parolanı istemiyoruz; açıklama alanlarına yazma. Oturum, güvenlik ve bu bilgilendirmenin hangi sürümünü gördüğünü belirttiğin kayıtlar da tutulur. Beyan kaydında kullanıcı kimliği, işlem türü, dil, metin sürümü, metnin içerik özeti, beyan metni ve sunucu saati yer alır. Bu özellik ayrıca IP adresi veya tarayıcı kimliği toplamaz."
+        },
+        {
+          "key": "legal_basis_and_collection",
+          "title": "Bilgiler nasıl toplanıyor, hangi gerekçeyle kullanılıyor?",
+          "text": "Bilgiler uygulamadaki formlar, yüklediğin dosyalar ve oturum işlemleri yoluyla elektronik ortamda toplanır. Hesap ve bütçe hizmetinin sunulması için gerekli işlemler KVKK 5/2(c) kapsamındaki sözleşmenin kurulması veya ifası; güvenlik ve kötüye kullanımı önleme işlemleri temel hak ve özgürlüklerine zarar vermemek koşuluyla KVKK 5/2(f) kapsamındaki meşru menfaat gerekçesiyle değerlendirilir. Bu yerel taslakta bu değerlendirme henüz işletmeci tarafından kesinleştirilmemiştir. Kutuyu işaretlemen açık rıza ya da pazarlama izni değildir. Gerekli oturum çerezi girişini korur; dil ve tema tercihin tarayıcında saklanır."
+        },
+        {
+          "key": "recipients_and_transfers",
+          "title": "Hizmet sağlayıcılar ve yurt dışı aktarım",
+          "text": "Uygulama Vercel üzerinde çalışır; veritabanı Supabase üzerinde tutulur. Bu sağlayıcıların Türkiye dışındaki altyapıları üzerinden kişisel veri işlenebilir. İşletmeci tarafından KVKK 9 kapsamında geçerli aktarım mekanizmasının ve hizmet sağlayıcı sözleşmelerinin doğrulanması gerekiyor; bu taslak, böyle bir mekanizmanın kurulduğunu iddia etmez. Metni okudum kutusu yurt dışı aktarım için açık rıza yerine geçmez. Bu konu tamamlanmadan bu taslak canlı aydınlatma metni olarak etkinleştirilemez."
+        },
+        {
+          "key": "retention",
+          "title": "Bilgiler ne kadar tutuluyor?",
+          "text": "Hesap ve bütçe kayıtları hizmetin kullanımı için tutulur. Hesap silindiğinde ona bağlı aydınlatma beyanları da aktif veritabanından silinir. Metinlerin sürümleri, hangi içeriğin gösterildiğini belirlemek için ayrı saklanır. Hizmet sağlayıcı günlükleri ve yedeklerin süreleri ile hesap kapanışından sonraki saklama/silme takvimi henüz işletmeci tarafından doğrulanmamıştır; bu bölüm tamamlanmadan taslak yayımlanmaz. Yalnızca gelir veya gideri silmek hesabını ya da aydınlatma beyanını silmez."
+        },
+        {
+          "key": "rights_and_application",
+          "title": "Hakların ve nasıl başvurabileceğin",
+          "text": "KVKK 11 kapsamında verilerinin işlenip işlenmediğini öğrenme; işlenmişse bilgi isteme; amacını, amaca uygun kullanımını ve aktarıldığı kişileri öğrenme; eksik veya yanlış verileri düzelttirme; şartları oluştuğunda silme/yok etme ve bunun aktarılan kişilere bildirilmesini isteme; yalnız otomatik incelemeyle aleyhine çıkan sonuca itiraz etme ve hukuka aykırı işleme nedeniyle zararın giderilmesini isteme hakların bulunur. Başvurunu hesabında kayıtlı e-posta adresinden aydino1996@gmail.com adresine, kimliğini ve talebini açıklayarak gönderebilirsin. Başvuruların niteliğine göre en kısa sürede, en geç 30 gün içinde yanıtlanması gerekir. Kimliğini doğrulamak için gerekli bilgi istenebilir; gereksiz finansal belge veya parola gönderme."
+        }
+      ]
+    },
+    "en": {
+      "title": "Privacy Notice — Local Draft",
+      "sections": [
+        {
+          "key": "controller",
+          "title": "Controller and contact",
+          "text": "Aydın Özkan is responsible for the processing of personal data in this application. Send privacy requests to aydino1996@gmail.com."
+        },
+        {
+          "key": "data_and_purposes",
+          "title": "What information is used, and why?",
+          "text": "Your username, email and one-way password hash support account creation and security. Income, expenses, amounts, dates, bank/card labels, optional last four card digits and payment plans that you enter or import support budgets, balances and suggestions. The app does not connect to your bank. Do not enter full card numbers, CVV codes or banking passwords. Session, security and information-notice declarations are also recorded. A declaration contains your user ID, action, language, notice version, content hash, declaration text and server time. This feature does not additionally collect IP addresses or browser identifiers."
+        },
+        {
+          "key": "legal_basis_and_collection",
+          "title": "Collection and legal grounds",
+          "text": "Information is collected electronically through forms, uploaded files and session operations. Processing necessary to provide the account and budgeting service is assessed under KVKK Article 5/2(c), performance or establishment of a contract. Security and abuse prevention are assessed under Article 5/2(f), legitimate interests subject to your fundamental rights and freedoms. The operator has not finalized this assessment for this local draft. Checking the box is not consent or marketing permission. A necessary session cookie protects your login; language and theme preferences are stored in your browser."
+        },
+        {
+          "key": "recipients_and_transfers",
+          "title": "Providers and international transfers",
+          "text": "Vercel hosts the application and Supabase hosts its database. Their infrastructure may process personal data outside Türkiye. The operator must verify a valid KVKK Article 9 transfer mechanism and provider agreements. This draft does not claim that such a mechanism exists. A read-notice checkbox is not consent to international transfers. This draft cannot be enabled as the production notice until this issue is resolved."
+        },
+        {
+          "key": "retention",
+          "title": "Retention",
+          "text": "Account and budgeting records are kept to provide the service. Deleting an account also deletes its notice declarations from the active database. Notice versions are stored separately to identify the information shown. Provider log and backup periods and the post-closure deletion/retention schedule have not yet been verified by the operator. This section must be completed before publication. Deleting only an income or expense does not delete the account or its declarations."
+        },
+        {
+          "key": "rights_and_application",
+          "title": "Your rights and requests",
+          "text": "Under KVKK Article 11 you can learn whether your data is processed; request information, purposes, appropriate use and recipients; request correction, deletion or destruction where applicable and notification to recipients; object to a result against you based solely on automated processing; and seek compensation for damage caused by unlawful processing. Send requests from the email registered to your account to aydino1996@gmail.com, identifying yourself and describing the request. Requests must be answered as soon as possible and within 30 days, according to their nature. Necessary identity verification may be requested; do not send unnecessary financial documents or passwords."
+        }
+      ]
+    }
+  }
+}

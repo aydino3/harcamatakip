@@ -14,6 +14,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from werkzeug.exceptions import HTTPException
 
 import app as core
+import privacy_notice as privacy
 
 
 def create_app(test_config: dict | None = None) -> Flask:
@@ -39,6 +40,13 @@ def create_app(test_config: dict | None = None) -> Flask:
             import traceback as _tb
             print(f"[startup] init_db failed: {_db_err}", flush=True)
             _tb.print_exc()
+
+    # Disabled until the operator provides a complete, reviewed information notice.
+    notice_path = os.environ.get('PRIVACY_NOTICE_PATH')
+    notice = privacy.load_notice(web.config['PRIVACY_NOTICE'], allow_draft=bool(web.config.get('PRIVACY_NOTICE_ALLOW_DRAFT')) and not production) if 'PRIVACY_NOTICE' in web.config else privacy.from_file(notice_path) if notice_path else None
+    if notice:
+        privacy.initialize(notice)
+    web.extensions['privacy_notice'] = notice
 
     def json_error(message: str, status: int):
         return jsonify(error=message), status
@@ -118,7 +126,19 @@ def create_app(test_config: dict | None = None) -> Flask:
     @web.get("/api/session")
     def session_route():
         session = core.session_user(request.cookies.get(core.COOKIE))
-        return jsonify({"user_id": session["user_id"], "csrf": session["csrf_token"], "private_beta": web.config["PRIVATE_BETA"]} if session else {"user_id": None, "private_beta": web.config["PRIVATE_BETA"]})
+        payload = {"user_id": session["user_id"], "csrf": session["csrf_token"]} if session else {"user_id": None}
+        return jsonify({**payload, "private_beta": web.config["PRIVATE_BETA"], "privacy_notice": privacy.public_notice(notice)})
+
+    @web.get('/api/privacy-notice')
+    def privacy_notice_route():
+        return jsonify(privacy.public_notice(notice))
+
+    @web.get('/api/privacy-acknowledgments')
+    def privacy_acknowledgments_route():
+        session, error = auth()
+        if error:
+            return error
+        return jsonify(acknowledgments=privacy.acknowledgments_for_user(session['user_id']) if notice else [])
 
     @web.get("/api/options")
     def options_route():
@@ -517,13 +537,17 @@ def create_app(test_config: dict | None = None) -> Flask:
         identity = data.get("email", "") if scope == "register" else data.get("identifier", data.get("email", data.get("username", "")))
         if core.reserve_auth_attempt(address, scope) or core.reserve_auth_attempt(address, scope, identity):
             return json_error("Çok sayıda deneme yapıldı. Lütfen bir süre sonra tekrar deneyin.", 429)
+        try:
+            acknowledgment = privacy.prepare_acknowledgment(notice, data.get('privacy_acknowledgment'), scope)
+        except privacy.NoticeError as error:
+            return jsonify(error=str(error), code=error.code), error.status
         if scope == "register":
             if web.config["PRIVATE_BETA"] and not isinstance(data.get("invitation_token"), str):
                 return json_error("Özel beta kaydı için geçerli bir davet kodu gerekir.", 403)
             try:
                 # Missing usernames are rejected at the public registration boundary.
                 username = core.normalize_username(data.get("username"))
-                user_id = core.create_user(data.get("email", ""), data.get("password", ""), data.get("invitation_token"), web.config["PRIVATE_BETA"], username=username)
+                user_id = core.create_user(data.get("email", ""), data.get("password", ""), data.get("invitation_token"), web.config["PRIVATE_BETA"], username=username, privacy_ack=acknowledgment)
             except core.UsernameUnavailable as error:
                 return json_error(str(error),409)
             except core.InvalidUsername as error:
@@ -542,7 +566,7 @@ def create_app(test_config: dict | None = None) -> Flask:
                 return json_error("Kullanıcı adı, e-posta veya parola hatalı.", 401)
             core.clear_auth_failures(address, scope)
             core.clear_auth_failures(address, scope, identity)
-        token, csrf_token = core.create_session(user_id)
+        token, csrf_token = core.create_session(user_id, privacy_ack=acknowledgment if scope == "login" else None)
         response = jsonify(user_id=user_id, csrf=csrf_token)
         response.set_cookie(core.COOKIE, token, max_age=604800, httponly=True, samesite="Strict", secure=core.secure_cookie_enabled(), path="/")
         return response

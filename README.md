@@ -352,3 +352,17 @@ The sliding Türkçe / English selector is available on the sign-in screen and i
 Profile and Settings supports a statement closing day (1–31) independently of the payment due day. It is used only by Overview's card-spending report. If the nominal due day is on/before the closing day, that statement is paid in the next month; otherwise it is paid in the same month. Short months clamp displayed closing dates, while ±5-day payment adjustments never change the reporting cycle. Known legacy statements retain their recorded closing dates. A missing closing day is shown as incomplete instead of guessed.
 
 My Payments continues to manage statement totals, installments, actual payments, and adjustments by payment month. No existing statement totals, payment keys, actual payment dates, or bank movements are moved when a closing day is edited. Overview compares the closing month's card installments/additional spending and scheduled bank payments with that month's income; its spending report is distinct from the cash payment calendar and bank balance.
+
+### KVKK bilgilendirmesi (henüz üretimde etkin değil)
+
+`privacy_notice.py` giriş ve kayıtta sürümlü bilgilendirme beyanını doğrular. Bu bir açık rıza/pazarlama izni değildir; gerçek okumanın ispatı olduğu iddia edilmez. Beyan kullanıcı, işlem, dil, metin sürümü/SHA-256 ve sunucu UTC saatiyle tutulur. Başarısız girişte yazılmaz. Kayıt ve beyan, giriş oturumu ve beyan aynı veritabanı işlemini kullanır. Eski kullanıcılar için geriye dönük kayıt üretilmez. Hesap silinince ona bağlı beyanlar da silinir. Yayımlanmış metin uygulama üzerinden aynı sürümle değiştirilemez; her değişiklik yeni sürüm gerektirir. DB yöneticisine karşı değiştirilemezlik veya elektronik imza garantisi değildir.
+
+Üretimde `PRIVACY_NOTICE_PATH` ancak eksiksiz, hukuken değerlendirilmiş ve `publication_ready: true` olan JSON metne işaret edebilir. Yalnız bu açık yapılandırma özelliği etkinleştirir; eksik/geçersiz etkin yapılandırma başlangıçta reddedilir. Eklenen tablolar `privacy_notice_versions` ve `privacy_acknowledgments`; PostgreSQL'de RLS açık, PUBLIC/anon/authenticated erişimi yoktur. Özel uygulama sunucusunun DB sahibi rolü kullanılır. Şema değişikliği üretimden önce gözden geçirilmelidir. Yurt dışı aktarım mekanizması ve saklama süreleri, bir kutucuk veya `publication_ready` ayarıyla hukuken kurulmuş olmaz.
+
+Yerel taslak `privacy/notice.draft.json` canlı için tamamlanmamıştır. Gerçek hesap DB bağlantısı olmadan yalnız ayrı sentetik SQLite dosyasında önizleme:
+
+```sh
+EXPENSE_DB_PATH=/tmp/kvkk-preview.sqlite3 APP_ENV=development PRIVATE_BETA=0 python tools/privacy_local_review.py
+```
+
+Yerel önizleme canlı DB URL'lerini reddeder. Testler: `python -m unittest discover -s tests -p 'test_privacy_notice*.py' -v`; native PostgreSQL testleri mevcut `FINANCE_TEST_POSTGRES_BIN_DIR` ile çalışır. `npm run test:e2e` hem mali akışları hem izole KVKK kayıt/giriş ekranını kapsar.

@@ -631,6 +631,19 @@ Object.assign(messages,{
 Object.assign(messages,{"Gelir: Elindeki paraya eklenen veya eklenmesini beklediğin para. Maaşın gibi. Beklediğin para henüz yatmadıysa şu an elinde değildir.": "Income: money you receive or expect to receive, such as salary. Expected money is not in your hands until it arrives.", "Taksit: Bir alışverişin parasını tek seferde vermek yerine, birkaç ayrı tarihte parça parça ödemen. Burada her ay ödeyeceğin parça dikkate alınır.": "Installment: paying for a purchase in parts on several dates rather than all at once. This page uses the part payable each month."});
 Object.assign(messages,{"E-posta veya kullanıcı adı": "Email or username", "Kullanıcı adı, e-posta veya parola hatalı.": "Username, email or password is incorrect."});
 Object.assign(messages,{"Bu ad hem uygulamada görünür hem girişte kullanılır. Büyük/küçük harf fark etmez; her kullanıcı adı tek hesaba aittir.": "This name is both displayed in the app and used to sign in. It is case-insensitive and unique to your account."});
+Object.assign(messages,{
+  "Yerel taslak: Bu metin henüz canlı kullanım için tamamlanmadı.": "Local draft: this notice is not yet complete for production use.",
+  "KVKK Aydınlatma Metni’ni aç": "Open the Privacy Notice",
+  "Önce metni açıp oku, sonra kutuyu kendin işaretle. Bu beyan açık rıza veya pazarlama izni değildir.": "Open and read the notice first, then check the box yourself. This is not consent or marketing permission.",
+  "BİLGİLENDİRME": "PRIVACY INFORMATION",
+  "Metin sürümü": "Notice version",
+  "Metni kapat": "Close notice",
+  "Veri sorumlusu": "Data controller",
+  "Başvuru e-postası": "Contact email",
+  "Metni kapat ve forma dön": "Close notice and return to the form",
+  "Devam etmek için aydınlatma metnini okuyup bilgi edindiğinizi belirtin.": "To continue, read the notice and acknowledge that you received the information.",
+  "Aydınlatma metni güncellendi. Güncel metni açıp yeniden bilgi edinin.": "The privacy notice has changed. Open the current notice and acknowledge it again."
+});
 let language='tr';try{if(localStorage.getItem('finance.language')==='en')language='en'}catch{}
 function t(value){const key=String(value??''),trimmed=key.trim();if(language!=='en')return key;const translated=messages[trimmed];if(translated===undefined)return key;return key.slice(0,key.length-key.trimStart().length)+translated+key.slice(key.trimEnd().length)}
 function retranslate(value){const text=String(value??''),key=Object.keys(messages).find(key=>messages[key]===text.trim());return key===undefined?t(text):text.slice(0,text.length-text.trimStart().length)+t(key)+text.slice(text.trimEnd().length)}

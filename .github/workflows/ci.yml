@@ -49,7 +49,7 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Check Python syntax
-        run: python -m py_compile app.py webapp.py wsgi.py production.py simple_cashflow.py profile_settings.py recommendations.py tools/local_review_sandbox.py tests/test_app.py
+        run: python -m py_compile privacy_notice.py app.py webapp.py wsgi.py production.py simple_cashflow.py profile_settings.py recommendations.py tools/local_review_sandbox.py tests/test_app.py
 
       - name: Check frontend JavaScript syntax
         run: node --check static/app.js
