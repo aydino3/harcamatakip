@@ -1,13 +1,13 @@
 {
   "publication_ready": false,
-  "version": "2026-10-30-draft-1",
+  "version": "2026-10-30-draft-2",
   "controller": {
     "name": "Aydın Özkan",
     "email": "aydino1996@gmail.com"
   },
   "languages": {
     "tr": {
-      "title": "KVKK Aydınlatma Metni — Yerel Taslak",
+      "title": "KVKK Aydınlatma Metni (Taslak)",
       "sections": [
         {
           "key": "controller",
@@ -22,17 +22,17 @@
         {
           "key": "legal_basis_and_collection",
           "title": "Bilgiler nasıl toplanıyor, hangi gerekçeyle kullanılıyor?",
-          "text": "Bilgiler uygulamadaki formlar, yüklediğin dosyalar ve oturum işlemleri yoluyla elektronik ortamda toplanır. Hesap ve bütçe hizmetinin sunulması için gerekli işlemler KVKK 5/2(c) kapsamındaki sözleşmenin kurulması veya ifası; güvenlik ve kötüye kullanımı önleme işlemleri temel hak ve özgürlüklerine zarar vermemek koşuluyla KVKK 5/2(f) kapsamındaki meşru menfaat gerekçesiyle değerlendirilir. Bu yerel taslakta bu değerlendirme henüz işletmeci tarafından kesinleştirilmemiştir. Kutuyu işaretlemen açık rıza ya da pazarlama izni değildir. Gerekli oturum çerezi girişini korur; dil ve tema tercihin tarayıcında saklanır."
+          "text": "Bilgiler uygulamadaki formlar, yüklediğin dosyalar ve oturum işlemleri yoluyla elektronik ortamda toplanır. Hesap ve bütçe hizmetinin sunulması için gerekli işlemler KVKK 5/2(c) kapsamındaki sözleşmenin kurulması veya ifası; güvenlik ve kötüye kullanımı önleme işlemleri temel hak ve özgürlüklerine zarar vermemek koşuluyla KVKK 5/2(f) kapsamındaki meşru menfaat gerekçesiyle değerlendirilir. Bu taslakta bu değerlendirme henüz işletmeci tarafından kesinleştirilmemiştir. Kutuyu işaretlemen açık rıza ya da pazarlama izni değildir. Gerekli oturum çerezi girişini korur; dil ve tema tercihin tarayıcında saklanır."
         },
         {
           "key": "recipients_and_transfers",
           "title": "Hizmet sağlayıcılar ve yurt dışı aktarım",
-          "text": "Uygulama Vercel üzerinde çalışır; veritabanı Supabase üzerinde tutulur. Bu sağlayıcıların Türkiye dışındaki altyapıları üzerinden kişisel veri işlenebilir. İşletmeci tarafından KVKK 9 kapsamında geçerli aktarım mekanizmasının ve hizmet sağlayıcı sözleşmelerinin doğrulanması gerekiyor; bu taslak, böyle bir mekanizmanın kurulduğunu iddia etmez. Metni okudum kutusu yurt dışı aktarım için açık rıza yerine geçmez. Bu konu tamamlanmadan bu taslak canlı aydınlatma metni olarak etkinleştirilemez."
+          "text": "Uygulama Vercel üzerinde çalışır; veritabanı Supabase üzerinde tutulur. Bu sağlayıcıların Türkiye dışındaki altyapıları üzerinden kişisel veri işlenebilir. İşletmeci tarafından KVKK 9 kapsamında geçerli aktarım mekanizmasının ve hizmet sağlayıcı sözleşmelerinin doğrulanması gerekiyor; bu taslak, böyle bir mekanizmanın kurulduğunu iddia etmez. Metni okudum kutusu yurt dışı aktarım için açık rıza yerine geçmez. Bu taslağın yayımlanması aktarım mekanizmasının tamamlandığı anlamına gelmez."
         },
         {
           "key": "retention",
           "title": "Bilgiler ne kadar tutuluyor?",
-          "text": "Hesap ve bütçe kayıtları hizmetin kullanımı için tutulur. Hesap silindiğinde ona bağlı aydınlatma beyanları da aktif veritabanından silinir. Metinlerin sürümleri, hangi içeriğin gösterildiğini belirlemek için ayrı saklanır. Hizmet sağlayıcı günlükleri ve yedeklerin süreleri ile hesap kapanışından sonraki saklama/silme takvimi henüz işletmeci tarafından doğrulanmamıştır; bu bölüm tamamlanmadan taslak yayımlanmaz. Yalnızca gelir veya gideri silmek hesabını ya da aydınlatma beyanını silmez."
+          "text": "Hesap ve bütçe kayıtları hizmetin kullanımı için tutulur. Hesap silindiğinde ona bağlı aydınlatma beyanları da aktif veritabanından silinir. Metinlerin sürümleri, hangi içeriğin gösterildiğini belirlemek için ayrı saklanır. Hizmet sağlayıcı günlükleri ve yedeklerin süreleri ile hesap kapanışından sonraki saklama/silme takvimi henüz işletmeci tarafından doğrulanmamıştır; bu metin bu eksikler açık tutularak taslak olarak sunulur. Yalnızca gelir veya gideri silmek hesabını ya da aydınlatma beyanını silmez."
         },
         {
           "key": "rights_and_application",
@@ -42,7 +42,7 @@
       ]
     },
     "en": {
-      "title": "Privacy Notice — Local Draft",
+      "title": "Privacy Notice (Draft)",
       "sections": [
         {
           "key": "controller",
@@ -57,17 +57,17 @@
         {
           "key": "legal_basis_and_collection",
           "title": "Collection and legal grounds",
-          "text": "Information is collected electronically through forms, uploaded files and session operations. Processing necessary to provide the account and budgeting service is assessed under KVKK Article 5/2(c), performance or establishment of a contract. Security and abuse prevention are assessed under Article 5/2(f), legitimate interests subject to your fundamental rights and freedoms. The operator has not finalized this assessment for this local draft. Checking the box is not consent or marketing permission. A necessary session cookie protects your login; language and theme preferences are stored in your browser."
+          "text": "Information is collected electronically through forms, uploaded files and session operations. Processing necessary to provide the account and budgeting service is assessed under KVKK Article 5/2(c), performance or establishment of a contract. Security and abuse prevention are assessed under Article 5/2(f), legitimate interests subject to your fundamental rights and freedoms. The operator has not finalized this assessment for this draft. Checking the box is not consent or marketing permission. A necessary session cookie protects your login; language and theme preferences are stored in your browser."
         },
         {
           "key": "recipients_and_transfers",
           "title": "Providers and international transfers",
-          "text": "Vercel hosts the application and Supabase hosts its database. Their infrastructure may process personal data outside Türkiye. The operator must verify a valid KVKK Article 9 transfer mechanism and provider agreements. This draft does not claim that such a mechanism exists. A read-notice checkbox is not consent to international transfers. This draft cannot be enabled as the production notice until this issue is resolved."
+          "text": "Vercel hosts the application and Supabase hosts its database. Their infrastructure may process personal data outside Türkiye. The operator must verify a valid KVKK Article 9 transfer mechanism and provider agreements. This draft does not claim that such a mechanism exists. A read-notice checkbox is not consent to international transfers. Publication of this draft does not mean that a valid transfer mechanism has been established."
         },
         {
           "key": "retention",
           "title": "Retention",
-          "text": "Account and budgeting records are kept to provide the service. Deleting an account also deletes its notice declarations from the active database. Notice versions are stored separately to identify the information shown. Provider log and backup periods and the post-closure deletion/retention schedule have not yet been verified by the operator. This section must be completed before publication. Deleting only an income or expense does not delete the account or its declarations."
+          "text": "Account and budgeting records are kept to provide the service. Deleting an account also deletes its notice declarations from the active database. Notice versions are stored separately to identify the information shown. Provider log and backup periods and the post-closure deletion/retention schedule have not yet been verified by the operator. This notice is published as a draft with these outstanding issues disclosed. Deleting only an income or expense does not delete the account or its declarations."
         },
         {
           "key": "rights_and_application",

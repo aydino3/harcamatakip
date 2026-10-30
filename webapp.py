@@ -41,9 +41,10 @@ def create_app(test_config: dict | None = None) -> Flask:
             print(f"[startup] init_db failed: {_db_err}", flush=True)
             _tb.print_exc()
 
-    # Disabled until the operator provides a complete, reviewed information notice.
+    # Draft publication requires an explicit operator setting; never implies legal completion.
     notice_path = os.environ.get('PRIVACY_NOTICE_PATH')
-    notice = privacy.load_notice(web.config['PRIVACY_NOTICE'], allow_draft=bool(web.config.get('PRIVACY_NOTICE_ALLOW_DRAFT')) and not production) if 'PRIVACY_NOTICE' in web.config else privacy.from_file(notice_path) if notice_path else None
+    allow_draft = os.environ.get('PRIVACY_NOTICE_ALLOW_DRAFT') == '1' or (bool(web.config.get('PRIVACY_NOTICE_ALLOW_DRAFT')) and not production)
+    notice = privacy.load_notice(web.config['PRIVACY_NOTICE'], allow_draft=allow_draft) if 'PRIVACY_NOTICE' in web.config else privacy.from_file(notice_path, allow_draft=allow_draft) if notice_path else None
     if notice:
         privacy.initialize(notice)
     web.extensions['privacy_notice'] = notice

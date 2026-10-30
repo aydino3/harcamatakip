@@ -26,11 +26,11 @@ test('KVKK: boş kutu, iki dil, kayıt/giriş ve hesaba bağlı beyan',async()=>
   await page.getByRole('button',{name:'English',exact:true}).click();
   assert.equal(await form.locator('[name=identifier]').inputValue(),'privacy.user');assert.equal(await box.isChecked(),false);
   await page.locator('#open-privacy').click();await page.locator('#privacy-dialog').waitFor({state:'visible'});
-  await page.locator('#finish-privacy').click();assert.equal(await box.isChecked(),false);assert.equal(await submit.isDisabled(),true);
+  assert.equal(await box.isDisabled(),true);await page.locator('#close-privacy').click();assert.equal(await box.isDisabled(),true);await page.locator('#open-privacy').click();await page.locator('#finish-privacy').click();assert.equal(await box.isDisabled(),false);assert.equal(await box.isChecked(),false);assert.equal(await submit.isDisabled(),true);
   await box.check();assert.equal(await submit.isEnabled(),true);
   await page.getByRole('button',{name:'Türkçe',exact:true}).click();assert.equal(await box.isChecked(),false);assert.equal(await box.isDisabled(),true);
   await page.locator('#toggle-auth').click();await form.locator('[name=username]').fill('privacy.user');await form.locator('[name=email]').fill('privacy@example.invalid');await form.locator('[name=password]').fill('synthetic-privacy-password');
-  await page.locator('#open-privacy').click();await page.locator('#close-privacy').click();await box.check();await submit.click();await page.locator('#open-profile').waitFor();
+  await page.locator('#open-privacy').click();await page.locator('#close-privacy').click();assert.equal(await box.isDisabled(),true);await page.locator('#open-privacy').click();await page.locator('#finish-privacy').click();await box.check();await submit.click();await page.locator('#open-profile').waitFor();
   const receipt=await(await context.request.get(url+'/api/privacy-acknowledgments')).json();assert.equal(receipt.acknowledgments.length,1);assert.equal(receipt.acknowledgments[0].action,'register');
   await page.locator('#logout').click();await box.waitFor();assert.equal(await box.isChecked(),false);
   await form.locator('[name=identifier]').fill('privacy.user');await form.locator('[name=password]').fill('synthetic-privacy-password');await page.locator('#open-privacy').click();await page.locator('#finish-privacy').click();await box.check();await submit.click();await page.locator('#open-profile').waitFor();

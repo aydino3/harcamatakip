@@ -84,3 +84,18 @@ test('Adres çubuğundaki Tavsiyeler bağlantısı açık oturumda da sekmeyi a�
 test('Para yetmediğinde eksi işareti yerine eksik tutarı açıklanır; sıfır ve bilinmeyen tutar karışmaz',()=>{const ctx=context(async()=>response({}));assert.equal(vm.runInContext("adviceBalance('-12345',true)",ctx),'123,45 ₺ eksik');assert.equal(vm.runInContext("adviceBalance('0',true)",ctx),'0,00 ₺ kalır');assert.equal(vm.runInContext("adviceBalance(null,true)",ctx),'Eksik bilgi');assert.equal(vm.runInContext("adviceBalance('20000',false)",ctx),'200,00 ₺');const guide=vm.runInContext('adviceGuideMarkup()',ctx);for(const meaning of ['Ay sonunda kalacak para demek değil','Tamamı gereksiz alışveriş değildir','Bankanın gerçek tutarı otomatik okunmaz'])assert.ok(guide.includes(meaning));const item=vm.runInContext("adviceContent({code:'income_dependency',facts:{date:'2024-01-03',amount_minor:'50000',income_minor:'200000'}})",ctx);assert.ok(item.body.includes('tamamı o ilk ödeme gününden önce yatmayabilir'));assert.ok(item.action.includes('Gelirlerim'))});
 
 test('Yanlış girişte alanlar sıfırlanmaz; korumalı API oturum hatası giriş ekranını açmaya devam eder',async()=>{const ctx=context(async()=>({status:401,ok:false,json:async()=>({error:'Kullanıcı adı, e-posta veya parola hatalı.'})}));vm.runInContext('authView=()=>{authRegister=true}',ctx);await assert.rejects(vm.runInContext("api('/api/login',{method:'POST'})",ctx),/Kullanıcı adı, e-posta veya parola hatalı/);assert.equal(vm.runInContext('authRegister',ctx),false);await assert.rejects(vm.runInContext("api('/api/profile')",ctx),/Oturum açmanız gerekiyor/);assert.equal(vm.runInContext('authRegister',ctx),true)});
+
+test('KVKK kutusu yalnız metin sonundaki Okudum, anladım ile açılır; otomatik işaretlenmez',()=>{
+ const ctx=context(async()=>response({}));
+ const box={disabled:true,checked:false,focus(){this.focused=true}},submit={disabled:true};
+ const dialog={open:false,showModal(){this.open=true},close(){this.open=false}};
+ const nodes={'#open-privacy':{},'#close-privacy':{},'#finish-privacy':{},'#privacy-dialog':dialog,'#auth-form':{elements:{privacy_read:box},querySelector:()=>submit}};
+ ctx.document.querySelector=selector=>nodes[selector];vm.runInContext('bindPrivacy()',ctx);
+ nodes['#open-privacy'].onclick();assert.equal(dialog.open,true);assert.equal(box.disabled,true);
+ nodes['#close-privacy'].onclick();assert.equal(dialog.open,false);assert.equal(box.disabled,true);assert.equal(submit.disabled,true);
+ nodes['#open-privacy'].onclick();nodes['#finish-privacy'].onclick();assert.equal(dialog.open,false);assert.equal(box.disabled,false);assert.equal(box.checked,false);assert.equal(submit.disabled,true);assert.equal(box.focused,true);
+ box.checked=true;box.onchange();assert.equal(submit.disabled,false);
+ vm.runInContext("privacyNotice={enabled:true,documents:{tr:{acknowledgment:'Beyan',controller:{name:'Test',email:'test@example.invalid'},title:'Metin',sections:[],version:'test'}}}",ctx);
+ assert.doesNotMatch(vm.runInContext('privacyMarkup()',ctx),/privacy-explanation|Önce metni açıp oku/);
+ assert.match(vm.runInContext('privacyDialogMarkup()',ctx),/Okudum, anladım/);
+});

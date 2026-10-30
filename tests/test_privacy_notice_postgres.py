@@ -15,7 +15,7 @@ class PrivacyNoticePostgresTest(fixture.PrivacyNoticeTest):
 
     def setUp(self):
         postgres.SimplePostgresTest.setUp(self)
-        environment = patch.dict(os.environ, {'APP_ENV': 'development', 'PRIVATE_BETA': '0', 'PRIVACY_NOTICE_PATH': ''})
+        environment = patch.dict(os.environ, {'APP_ENV': 'development', 'PRIVATE_BETA': '0', 'PRIVACY_NOTICE_PATH': '', 'PRIVACY_NOTICE_ALLOW_DRAFT': '0'})
         environment.start()
         self.addCleanup(environment.stop)
         with core.connect() as db:

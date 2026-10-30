@@ -17,6 +17,11 @@ os.environ.setdefault("TRUST_PROXY", "1")
 os.environ.setdefault("EXPENSE_DB_PATH", "/tmp/expense-tracker.sqlite3")
 os.environ.setdefault("EXPENSE_BACKUP_DIR", "/tmp/expense-tracker-backups")
 
+# Operator explicitly approved publishing the notice as a draft on 2026-10-30.
+# This setting does not certify legal compliance or an international transfer basis.
+os.environ.setdefault("PRIVACY_NOTICE_PATH", str(_ROOT / "privacy" / "notice.draft.json"))
+os.environ.setdefault("PRIVACY_NOTICE_ALLOW_DRAFT", "1")
+
 from webapp import create_app  # noqa: E402
 
 app = create_app()

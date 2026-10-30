@@ -632,15 +632,14 @@ Object.assign(messages,{"Gelir: Elindeki paraya eklenen veya eklenmesini bekledi
 Object.assign(messages,{"E-posta veya kullanıcı adı": "Email or username", "Kullanıcı adı, e-posta veya parola hatalı.": "Username, email or password is incorrect."});
 Object.assign(messages,{"Bu ad hem uygulamada görünür hem girişte kullanılır. Büyük/küçük harf fark etmez; her kullanıcı adı tek hesaba aittir.": "This name is both displayed in the app and used to sign in. It is case-insensitive and unique to your account."});
 Object.assign(messages,{
-  "Yerel taslak: Bu metin henüz canlı kullanım için tamamlanmadı.": "Local draft: this notice is not yet complete for production use.",
+  "Aydınlatma metni taslağı": "Draft privacy notice",
   "KVKK Aydınlatma Metni’ni aç": "Open the Privacy Notice",
-  "Önce metni açıp oku, sonra kutuyu kendin işaretle. Bu beyan açık rıza veya pazarlama izni değildir.": "Open and read the notice first, then check the box yourself. This is not consent or marketing permission.",
   "BİLGİLENDİRME": "PRIVACY INFORMATION",
   "Metin sürümü": "Notice version",
   "Metni kapat": "Close notice",
   "Veri sorumlusu": "Data controller",
   "Başvuru e-postası": "Contact email",
-  "Metni kapat ve forma dön": "Close notice and return to the form",
+  "Okudum, anladım": "I have read and understood",
   "Devam etmek için aydınlatma metnini okuyup bilgi edindiğinizi belirtin.": "To continue, read the notice and acknowledge that you received the information.",
   "Aydınlatma metni güncellendi. Güncel metni açıp yeniden bilgi edinin.": "The privacy notice has changed. Open the current notice and acknowledge it again."
 });

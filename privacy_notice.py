@@ -67,9 +67,9 @@ def public_notice(notice):
     return notice if notice else {'enabled': False}
 
 
-def from_file(path):
+def from_file(path, allow_draft=False):
     with open(path, encoding='utf-8') as handle:
-        return load_notice(json.load(handle))
+        return load_notice(json.load(handle), allow_draft=allow_draft)
 
 
 def initialize(notice):

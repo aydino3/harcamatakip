@@ -30,7 +30,7 @@ class PrivacyNoticeTest(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch.object(core, 'DB_PATH', Path(self.temp.name) / 'synthetic.sqlite3').start()
         patch.object(core, '_DATABASE_URL', '').start()
-        patch.dict(os.environ, {'APP_ENV': 'development', 'PRIVATE_BETA': '0', 'PRIVACY_NOTICE_PATH': ''}).start()
+        patch.dict(os.environ, {'APP_ENV': 'development', 'PRIVATE_BETA': '0', 'PRIVACY_NOTICE_PATH': '', 'PRIVACY_NOTICE_ALLOW_DRAFT': '0'}).start()
         core.init_db()
         self.user = core.create_user('fixture@example.invalid', 'synthetic-password')
         self.other = core.create_user('other@example.invalid', 'synthetic-password')
@@ -163,3 +163,12 @@ class PrivacyNoticeTest(unittest.TestCase):
         raw['languages']['tr']['sections'].pop()
         with self.assertRaises(ValueError):
             privacy.load_notice(raw)
+
+    def test_explicit_operator_setting_can_publish_draft_without_marking_it_final(self):
+        raw = notice_fixture()
+        raw['publication_ready'] = False
+        with patch.dict(os.environ, {'APP_ENV': 'production', 'PRIVATE_BETA': '0', 'PRIVACY_NOTICE_ALLOW_DRAFT': '1'}):
+            application = webapp.create_app({'TESTING': True, 'PRIVACY_NOTICE': raw})
+        client = application.test_client()
+        self.assertTrue(client.get('/api/privacy-notice').get_json()['draft'])
+        self.assertEqual(client.post('/api/login', json={'identifier': 'anything', 'password': 'synthetic-password'}).status_code, 428)
