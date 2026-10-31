@@ -57,7 +57,7 @@ test('Tavsiyeler beşinci sekme: gerçek hesaplamalı nakit açığı, yalıtıl
  const context=await browser.newContext({viewport:{width:390,height:900}}),page=await context.newPage();
  try{
  const auth=await(await context.request.post(url+'/api/register',{data:{email:'advice-e2e@example.invalid',username:'advice-e2e',password:'synthetic-advice-password'}})).json(),headers={'X-CSRF-Token':auth.csrf};
- const day=offset=>new Date(Date.now()+offset*86400000).toISOString().slice(0,10),today=day(0),due=day(1),income=day(3),month=today.slice(0,7);
+ const day=offset=>new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Istanbul'}).format(new Date(Date.now()+offset*86400000)),today=day(0),due=day(1),income=day(3),month=today.slice(0,7);
  assert.equal((await context.request.put(url+'/api/simple-opening',{headers,data:{amount:'100',effective_on:today}})).status(),200);
  assert.equal((await context.request.post(url+'/api/simple-income',{headers,data:{description:'Tavsiye test geliri',amount:'300',expected_on:income,status:'expected',request_key:'advice-e2e-income-0001'}})).status(),200);
  assert.equal((await context.request.post(url+'/api/simple-payment-plans',{headers,data:{description:'Önce gelen ödeme',amount:'200',entry_kind:'regular',frequency:'monthly',start_on:due,end_on:due,request_key:'advice-e2e-payment-0001'}})).status(),200);

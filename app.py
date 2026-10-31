@@ -16,7 +16,13 @@ import sys
 import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+def business_today() -> date:
+    """Financial calendar day shared by UI and server, independent of host TZ."""
+    return datetime.now(ZoneInfo("Europe/Istanbul")).date()
+
 
 # An explicit application URL takes priority during database migrations.
 # Marketplace POSTGRES_URL remains the pooler-compatible default; DATABASE_URL
@@ -434,7 +440,7 @@ def _apply_additive_schema(db):
     card_columns = {row[1] for row in db.execute('PRAGMA table_info("credit_cards")')}
     if "due_day" not in card_columns:
         db.execute("ALTER TABLE credit_cards ADD COLUMN due_day INTEGER NOT NULL DEFAULT 1 CHECK(due_day BETWEEN 1 AND 31)")
-        today = date.today()
+        today = business_today()
         cards = db.execute("SELECT id,closing_day,due_days_after_close FROM credit_cards").fetchall()
         for card in cards:
             closing = next_card_closing_date(int(card["closing_day"]), today)
@@ -1176,7 +1182,7 @@ def delete_account(user_id: int, password: str, confirmation: str) -> bool:
 
 
 def summary(user_id: int, month: str, as_of: date | None = None):
-    as_of = as_of or date.today()
+    as_of = as_of or business_today()
     start, end = month_bounds(month)
     prev_y, prev_m = map(int, month.split("-"))
     prev_month = None if (prev_y == 1 and prev_m == 1) else (f"{prev_y-1:04d}-12" if prev_m == 1 else f"{prev_y:04d}-{prev_m-1:02d}")
@@ -1335,7 +1341,7 @@ def save_income_rule(user_id: int, data: dict) -> int:
                 return 0
             db.execute("UPDATE income_rules SET category_id=?,income_type=?,description=?,frequency=?,schedule_mode=?,start_on=?,end_on=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?",
                        (category_id, income_type, description, frequency, schedule_mode, start_on.isoformat(), end_value, rule_id, user_id))
-            effective_on = max(date.today(), start_on).isoformat()
+            effective_on = max(business_today(), start_on).isoformat()
             db.execute("INSERT INTO income_rule_amounts(user_id,rule_id,effective_on,amount_minor) VALUES(?,?,?,?) ON CONFLICT(rule_id,effective_on) DO UPDATE SET amount_minor=excluded.amount_minor",
                        (user_id, rule_id, effective_on, amount_minor))
             # Settings only affect future, unreceived projections. Historical or
@@ -1351,7 +1357,7 @@ def save_income_rule(user_id: int, data: dict) -> int:
 
 def set_income_rule_amount(user_id: int, rule_id: int, effective_value: str, amount: str) -> bool:
     effective_on = date.fromisoformat(effective_value)
-    if effective_on.isoformat() != effective_value or effective_on < date.today():
+    if effective_on.isoformat() != effective_value or effective_on < business_today():
         raise ValueError("effective date must be today or later")
     amount_minor = money_to_minor(amount)
     if amount_minor <= 0 or amount_minor > MAX_MINOR:
@@ -1385,8 +1391,8 @@ def set_income_status(user_id: int, income_id: int, status: str, received_value=
         raise ValueError("invalid income status")
     received_on = None
     if status == "received":
-        received_on = date.fromisoformat(received_value or date.today().isoformat())
-        if received_on.isoformat() != (received_value or date.today().isoformat()) or received_on > date.today():
+        received_on = date.fromisoformat(received_value or business_today().isoformat())
+        if received_on.isoformat() != (received_value or business_today().isoformat()) or received_on > business_today():
             raise ValueError("invalid receipt date")
     with connect() as db:
         row = db.execute("SELECT status FROM income_records WHERE id=? AND user_id=?", (income_id, user_id)).fetchone()
@@ -1407,7 +1413,7 @@ def delete_income(user_id: int, income_id: int) -> bool:
 
 def income_totals(user_id: int, month: str, as_of: date | None = None):
     start, end = month_bounds(month)
-    as_of = as_of or date.today()
+    as_of = as_of or business_today()
     with connect() as db:
         rows = db.execute("SELECT r.amount_minor,r.status,r.expected_on,r.received_on,q.frequency,q.schedule_mode FROM income_records r LEFT JOIN income_rules q ON q.id=r.rule_id AND q.user_id=r.user_id WHERE r.user_id=? AND r.status!='cancelled' AND (r.rule_id IS NULL OR q.status='active') AND ((r.status='received' AND r.received_on>=? AND r.received_on<?) OR (r.status='expected' AND r.expected_on>=? AND r.expected_on<?))", (user_id,start,end,income_lookback_start(date.fromisoformat(start)).isoformat(),end)).fetchall()
     received = sum(int(row["amount_minor"]) for row in rows if row["status"] == "received")
@@ -1416,7 +1422,7 @@ def income_totals(user_id: int, month: str, as_of: date | None = None):
 
 
 def income_overview(user_id: int, month: str, as_of: date | None = None):
-    as_of = as_of or date.today()
+    as_of = as_of or business_today()
     month_start, month_end = month_bounds(month)
     window_start = date.fromisoformat(month_start)
     window_end = date.fromisoformat(month_end)
@@ -1473,7 +1479,7 @@ def save_opening_cash(user_id: int, amount: str, effective_value: str):
     """Set the confirmed cash-and-bank balance that anchors subsequent cash accounting."""
     amount_minor = money_to_minor(amount)
     effective_on = date.fromisoformat(effective_value)
-    if amount_minor < 0 or amount_minor > MAX_MINOR or effective_on.isoformat() != effective_value or effective_on > date.today():
+    if amount_minor < 0 or amount_minor > MAX_MINOR or effective_on.isoformat() != effective_value or effective_on > business_today():
         raise ValueError("invalid opening cash")
     with connect() as db:
         db.execute("INSERT INTO cash_settings(user_id,opening_balance_minor,effective_on) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET opening_balance_minor=excluded.opening_balance_minor,effective_on=excluded.effective_on,updated_at=CURRENT_TIMESTAMP",
@@ -1491,7 +1497,7 @@ def add_cash_adjustment(user_id: int, amount: str, adjustment_value: str, descri
     amount_minor = sign * money_to_minor(raw)
     adjustment_on = date.fromisoformat(adjustment_value)
     description = description.strip()
-    if not amount_minor or abs(amount_minor) > MAX_MINOR or adjustment_on.isoformat() != adjustment_value or adjustment_on > date.today() or not description or len(description) > 160:
+    if not amount_minor or abs(amount_minor) > MAX_MINOR or adjustment_on.isoformat() != adjustment_value or adjustment_on > business_today() or not description or len(description) > 160:
         raise ValueError("invalid cash adjustment")
     with connect() as db:
         settings = db.execute("SELECT effective_on FROM cash_settings WHERE user_id=?", (user_id,)).fetchone()
@@ -1504,7 +1510,7 @@ def add_cash_adjustment(user_id: int, amount: str, adjustment_value: str, descri
 
 def get_cash_position(user_id: int, as_of: date | None = None):
     """Return confirmed balance only when an explicit opening balance anchors history."""
-    as_of = as_of or date.today()
+    as_of = as_of or business_today()
     with connect() as db:
         settings = db.execute("SELECT opening_balance_minor,effective_on FROM cash_settings WHERE user_id=?", (user_id,)).fetchone()
         adjustments = [dict(row) for row in db.execute("SELECT id,adjustment_on,amount_minor,description FROM cash_adjustments WHERE user_id=? ORDER BY adjustment_on,id", (user_id,)).fetchall()]
@@ -1528,7 +1534,7 @@ def _month_range(start: date, end: date):
 
 def payment_calendar(user_id: int, start_value: str, end_value: str, as_of: date | None = None):
     """Build user-scoped calendar events from the existing authoritative records."""
-    as_of = as_of or date.today()
+    as_of = as_of or business_today()
     start, end = date.fromisoformat(start_value), date.fromisoformat(end_value)
     if start.isoformat() != start_value or end.isoformat() != end_value or end < start or (end - start).days > 366:
         raise ValueError("invalid calendar range")
@@ -1604,7 +1610,7 @@ def payment_calendar(user_id: int, start_value: str, end_value: str, as_of: date
 
 
 def cash_flow_forecast(user_id: int, start_value: str | None = None, end_value: str | None = None, as_of: date | None = None):
-    as_of = as_of or date.today()
+    as_of = as_of or business_today()
     start_value = start_value or as_of.isoformat()
     if end_value is None:
         month_index = as_of.year*12+as_of.month-1+2
@@ -1720,7 +1726,7 @@ def _month_close(year: int, month: int, day_number: int) -> date:
 
 
 def next_card_closing_date(closing_day: int, as_of: date | None = None) -> date:
-    as_of = as_of or date.today()
+    as_of = as_of or business_today()
     closing = _month_close(as_of.year, as_of.month, closing_day)
     if closing < as_of:
         year, month = as_of.year + (as_of.month == 12), (as_of.month % 12) + 1
@@ -1820,7 +1826,7 @@ def save_credit_card(user_id: int, data: dict) -> int:
 
 
 def _recalculate_future_statement_dates(db, user_id: int, card_id: int, closing_day: int, due_day: int):
-    today = date.today().isoformat()
+    today = business_today().isoformat()
     statements = db.execute("SELECT id,period_start FROM card_statements WHERE user_id=? AND card_id=? AND closing_on>=? AND dates_manually_corrected=0 AND NOT EXISTS (SELECT 1 FROM card_repayments r WHERE r.user_id=card_statements.user_id AND r.card_id=card_statements.card_id AND r.statement_id=card_statements.id)", (user_id, card_id, today)).fetchall()
     for statement in statements:
         period_start = date.fromisoformat(statement["period_start"])
@@ -1855,7 +1861,7 @@ def list_card_statements(user_id: int, card_id: int):
             item["total_minor"] = int(purchase) + int(installments)
             item["paid_minor"] = int(paid)
             item["remaining_minor"] = max(0, item["total_minor"] - item["paid_minor"])
-            item["status"] = "paid" if item["remaining_minor"] == 0 and item["total_minor"] else "overdue" if item["due_on"] < date.today().isoformat() else "partial" if item["paid_minor"] else "unpaid"
+            item["status"] = "paid" if item["remaining_minor"] == 0 and item["total_minor"] else "overdue" if item["due_on"] < business_today().isoformat() else "partial" if item["paid_minor"] else "unpaid"
             output.append(item)
         return output
 
@@ -1876,10 +1882,10 @@ def edit_statement_dates(user_id: int, statement_id: int, closing_on_value: str,
 
 def record_card_repayment(user_id: int, card_id: int, data: dict):
     amount = money_to_minor(data.get("amount"))
-    paid_value = data.get("paid_on", date.today().isoformat())
+    paid_value = data.get("paid_on", business_today().isoformat())
     paid_on = date.fromisoformat(paid_value)
     note = data.get("note", "")
-    if amount <= 0 or amount > MAX_MINOR or paid_on.isoformat() != paid_value or paid_on > date.today() or not isinstance(note, str) or len(note) > 500:
+    if amount <= 0 or amount > MAX_MINOR or paid_on.isoformat() != paid_value or paid_on > business_today() or not isinstance(note, str) or len(note) > 500:
         raise ValueError("invalid repayment")
     statement_id = record_id(data.get("statement_id"))
     with connect() as db:
@@ -1934,8 +1940,8 @@ def list_installments(user_id: int, card_id: int | None = None):
 def set_installment_status(user_id: int, occurrence_id: int, status: str, paid_on_value: str | None = None):
     if status not in ("paid", "cancelled", "unpaid"):
         raise ValueError("invalid installment status")
-    paid_on = date.fromisoformat(paid_on_value) if paid_on_value else date.today()
-    if paid_on.isoformat() != (paid_on_value or paid_on.isoformat()) or paid_on > date.today():
+    paid_on = date.fromisoformat(paid_on_value) if paid_on_value else business_today()
+    if paid_on.isoformat() != (paid_on_value or paid_on.isoformat()) or paid_on > business_today():
         raise ValueError("invalid installment payment date")
     with connect() as db:
         row = db.execute("SELECT o.status,o.amount_minor,o.statement_id,p.card_id FROM installment_occurrences o JOIN installment_plans p ON p.id=o.plan_id WHERE o.id=? AND o.user_id=?", (occurrence_id,user_id)).fetchone()
@@ -1955,7 +1961,7 @@ def save_expense(user_id: int, data: dict) -> int:
     spent_value=data.get("spent_on",""); description_value=data.get("description",""); note=data.get("note","")
     if not isinstance(spent_value,str) or not isinstance(description_value,str) or not isinstance(note,str): raise ValueError("invalid expense fields")
     amount=money_to_minor(data.get("amount")); spent_on=date.fromisoformat(spent_value); description=description_value.strip()
-    if spent_on.isoformat() != spent_value or spent_on > date.today() or amount<=0 or not description or len(description)>160 or len(note)>1000: raise ValueError("invalid expense")
+    if spent_on.isoformat() != spent_value or spent_on > business_today() or amount<=0 or not description or len(description)>160 or len(note)>1000: raise ValueError("invalid expense")
     category=record_id(data.get("category_id"))
     method=record_id(data.get("payment_method_id"))
     card_id=record_id(data.get("card_id"))
@@ -2081,7 +2087,7 @@ def parse_expense_csv(user_id: int, content: str):
                "category": "", "payment_method_id": None, "payment_method": "", "note": "", "errors": [], "duplicate": False}
         try:
             row["date"] = parse_csv_date(cells[columns["date"]].strip())
-            if date.fromisoformat(row["date"]) > date.today():
+            if date.fromisoformat(row["date"]) > business_today():
                 raise ValueError("Gelecek tarihli harcama eklenemez.")
         except (ValueError, IndexError):
             row["errors"].append("Tarih geçersiz; YYYY-AA-GG veya GG.AA.YYYY kullanın.")
@@ -2260,7 +2266,7 @@ def set_recurring_status(user_id: int, recurring_id: int, status: str) -> bool:
 
 
 def recurring_overview(user_id: int, as_of: date | None = None):
-    as_of = as_of or date.today()
+    as_of = as_of or business_today()
     horizon = as_of + timedelta(days=45)
     with connect() as db:
         rules = db.execute("SELECT r.*,c.name category,p.name payment_method FROM recurring_expenses r LEFT JOIN categories c ON c.id=r.category_id AND c.user_id=r.user_id LEFT JOIN payment_methods p ON p.id=r.payment_method_id AND p.user_id=r.user_id WHERE r.user_id=? ORDER BY r.status,r.description", (user_id,)).fetchall()
@@ -2299,7 +2305,7 @@ def recurring_overview(user_id: int, as_of: date | None = None):
 
 
 def complete_recurring_occurrence(user_id: int, recurring_id: int, scheduled_value: str, as_of: date | None = None):
-    as_of = as_of or date.today()
+    as_of = as_of or business_today()
     try:
         scheduled_on=date.fromisoformat(scheduled_value)
     except (ValueError,TypeError):

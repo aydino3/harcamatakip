@@ -282,7 +282,7 @@ class AppTest(unittest.TestCase):
         category_a,_=self.category_and_method(self.user_a)
         category_b,_=self.category_and_method(self.user_b)
         with app.connect() as db:db.execute("INSERT INTO categories(user_id,name) VALUES(?,?)",(self.user_a,"Yalnızca A"))
-        tomorrow=(date.today()+timedelta(days=1)).isoformat()
+        tomorrow=(app.business_today()+timedelta(days=1)).isoformat()
         with self.assertRaises(ValueError):app.save_expense(self.user_a,{"amount":"1.00","spent_on":tomorrow,"description":"Future","category_id":category_a})
         with self.assertRaises(sqlite3.IntegrityError):app.save_budget(self.user_a,"2024-02","10",category_b)
         with self.assertRaises(ValueError):app.save_expense(self.user_a,{"amount":"1.00","spent_on":"2024-02-01","description":"Currency","currency":"USD"})
@@ -446,7 +446,7 @@ class AppTest(unittest.TestCase):
 
     def test_card_rule_edit_recalculates_only_future_unpaid_unadjusted_statements(self):
         card=app.save_credit_card(self.user_a,{"bank_name":"Synthetic Bank","display_name":"Editable Dates","closing_day":28,"due_day":17})
-        today=date.today()
+        today=app.business_today()
         starts=[(today+timedelta(days=1)).isoformat(),(today+timedelta(days=2)).isoformat(),(today+timedelta(days=3)).isoformat()]
         with app.connect() as db:
             auto_id=db.execute("INSERT INTO card_statements(user_id,card_id,period_start,closing_on,due_on) VALUES(?,?,?,?,?)",(self.user_a,card,starts[0],(today+timedelta(days=10)).isoformat(),(today+timedelta(days=30)).isoformat())).lastrowid
@@ -468,7 +468,7 @@ class AppTest(unittest.TestCase):
         card=app.save_credit_card(self.user_a,{"bank_name":"Synthetic Bank","display_name":"Everyday","last_four":"1234","closing_day":31,"due_day":20,"credit_limit":"5000","opening_balance":"10"})
         self.assertEqual(app.save_credit_card(self.user_b,{"id":card,"bank_name":"X","display_name":"X","closing_day":1,"due_day":1}),0)
         category,method=self.category_and_method(self.user_a)
-        today=date.today()
+        today=app.business_today()
         with app.connect() as db: before=db.execute("SELECT count(*) FROM expenses WHERE user_id=?",(self.user_a,)).fetchone()[0]
         with self.assertRaises(ValueError):
             app.save_expense(self.user_a,{"amount":"10","spent_on":today.isoformat(),"description":"Invalid plan","card_id":card,"installments_count":3,"first_installment_on":(today-timedelta(days=1)).isoformat()})
@@ -512,7 +512,7 @@ class AppTest(unittest.TestCase):
 
     def test_card_schema_migration_preserves_existing_expenses(self):
         category,_=self.category_and_method(self.user_a)
-        saved=app.save_expense(self.user_a,{"amount":"5","spent_on":date.today().isoformat(),"description":"Preserved legacy row","category_id":category})
+        saved=app.save_expense(self.user_a,{"amount":"5","spent_on":app.business_today().isoformat(),"description":"Preserved legacy row","category_id":category})
         with app.connect() as db:
             db.execute("ALTER TABLE expenses DROP COLUMN installments_count")
             db.execute("ALTER TABLE expenses DROP COLUMN statement_id")
@@ -524,7 +524,7 @@ class AppTest(unittest.TestCase):
 
     def test_restore_migrates_previous_schema_backup_without_losing_expenses(self):
         category,_=self.category_and_method(self.user_a)
-        saved=app.save_expense(self.user_a,{"amount":"9.25","spent_on":date.today().isoformat(),"description":"Legacy backup expense","category_id":category})
+        saved=app.save_expense(self.user_a,{"amount":"9.25","spent_on":app.business_today().isoformat(),"description":"Legacy backup expense","category_id":category})
         app.BACKUP_DIR.mkdir(parents=True)
         legacy=app.BACKUP_DIR/"legacy-pre-card.sqlite3"
         app._copy_database_snapshot(app.DB_PATH,legacy)
@@ -537,7 +537,7 @@ class AppTest(unittest.TestCase):
             db.execute("DELETE FROM expenses WHERE id=?",(saved,))
         result=app.restore_backup(legacy)
         self.assertTrue(result["recovery_backup"])
-        self.assertEqual(app.summary(self.user_a,date.today().strftime("%Y-%m"))["spent_minor"],925)
+        self.assertEqual(app.summary(self.user_a,app.business_today().strftime("%Y-%m"))["spent_minor"],925)
         app.validate_database(app.DB_PATH)
 
     def test_income_recurrence_supports_weekly_month_end_last_day_salary_and_leap_years(self):
@@ -605,7 +605,7 @@ class AppTest(unittest.TestCase):
         self.assertEqual([r["expected_on"] for r in yearly],["2025-02-28"])
 
     def test_income_records_rules_amount_changes_status_and_user_isolation(self):
-        today=date.today(); current=today.strftime("%Y-%m")
+        today=app.business_today(); current=today.strftime("%Y-%m")
         income_id=app.save_income(self.user_a,{"description":"Synthetic freelance","income_type":"freelance","amount":"1250,50","expected_on":(today+timedelta(days=2)).isoformat()})
         self.assertEqual(app.income_overview(self.user_b,current)["records"],[])
         self.assertFalse(app.set_income_status(self.user_b,income_id,"received"))
@@ -641,7 +641,7 @@ class AppTest(unittest.TestCase):
         self.assertEqual(app.income_totals(self.user_a,next_month)["expected_minor"],0)
 
     def test_confirmed_cash_uses_opening_date_and_only_received_income_cash_expenses_and_repayments(self):
-        today=date.today(); effective=(today-timedelta(days=5)).isoformat(); before=(today-timedelta(days=6)).isoformat()
+        today=app.business_today(); effective=(today-timedelta(days=5)).isoformat(); before=(today-timedelta(days=6)).isoformat()
         self.assertFalse(app.get_cash_position(self.user_a)["reliable"])
         category,method=self.category_and_method(self.user_a)
         card=app.save_credit_card(self.user_a,{"bank_name":"Test Bank","display_name":"Test Card","closing_day":today.day,"due_day":20})
@@ -664,7 +664,7 @@ class AppTest(unittest.TestCase):
         self.assertFalse(app.get_cash_position(self.user_b)["reliable"])
 
     def test_cash_flow_orders_shortfall_before_salary_and_anchors_salary_to_month_end(self):
-        today=date.today(); start=(today+timedelta(days=1)).isoformat(); income_date=(today+timedelta(days=5)).isoformat()
+        today=app.business_today(); start=(today+timedelta(days=1)).isoformat(); income_date=(today+timedelta(days=5)).isoformat()
         app.save_opening_cash(self.user_a,"100",today.isoformat())
         category,method=self.category_and_method(self.user_a)
         recurring=app.save_recurring(self.user_a,{"description":"Synthetic scheduled rent","amount":"150","category_id":category,"payment_method_id":method,"frequency":"monthly","start_on":start})
@@ -694,7 +694,7 @@ class AppTest(unittest.TestCase):
         self.assertTrue(all(event["status"]=="paused" for event in salary_events))
 
     def test_installments_are_visible_but_forecasted_once_via_statement_due(self):
-        today=date.today(); card=app.save_credit_card(self.user_a,{"bank_name":"Synthetic","display_name":"Installment Card","closing_day":today.day,"due_day":15})
+        today=app.business_today(); card=app.save_credit_card(self.user_a,{"bank_name":"Synthetic","display_name":"Installment Card","closing_day":today.day,"due_day":15})
         expense=app.save_expense(self.user_a,{"amount":"100","spent_on":today.isoformat(),"description":"Installment purchase","card_id":card,"installments_count":3,"first_installment_on":today.isoformat()})
         self.assertTrue(expense)
         app.save_opening_cash(self.user_a,"1000",today.isoformat())
@@ -710,7 +710,7 @@ class AppTest(unittest.TestCase):
 
     def test_cash_schema_migration_is_additive_and_preserves_existing_records(self):
         category,_=self.category_and_method(self.user_a)
-        expense=app.save_expense(self.user_a,{"amount":"9","spent_on":date.today().isoformat(),"description":"Preserved expense","category_id":category})
+        expense=app.save_expense(self.user_a,{"amount":"9","spent_on":app.business_today().isoformat(),"description":"Preserved expense","category_id":category})
         with app.connect() as db:
             db.execute("DROP TABLE cash_adjustments")
             db.execute("DROP TABLE cash_settings")
@@ -723,7 +723,7 @@ class AppTest(unittest.TestCase):
     def test_income_categories_are_persisted_and_owner_checked(self):
         category_a,_=self.category_and_method(self.user_a)
         category_b,_=self.category_and_method(self.user_b)
-        today=date.today().isoformat()
+        today=app.business_today().isoformat()
         record_id=app.save_income(self.user_a,{"description":"Synthetic categorized income","amount":"40","expected_on":today,"category_id":str(category_a)})
         record=next(row for row in app.income_overview(self.user_a,today[:7])['records'] if row['id']==record_id)
         self.assertEqual(record['category_id'],category_a)
@@ -732,15 +732,15 @@ class AppTest(unittest.TestCase):
 
     def test_income_schema_migration_is_additive_and_preserves_expenses(self):
         category,_=self.category_and_method(self.user_a)
-        saved=app.save_expense(self.user_a,{"amount":"12.34","spent_on":date.today().isoformat(),"description":"Preserved expense","category_id":category})
+        saved=app.save_expense(self.user_a,{"amount":"12.34","spent_on":app.business_today().isoformat(),"description":"Preserved expense","category_id":category})
         app.init_db()
-        self.assertEqual(app.summary(self.user_a,date.today().strftime("%Y-%m"))["spent_minor"],1234)
+        self.assertEqual(app.summary(self.user_a,app.business_today().strftime("%Y-%m"))["spent_minor"],1234)
         with app.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM income_records").fetchone()[0],0)
             self.assertTrue(db.execute("SELECT 1 FROM expenses WHERE id=? AND user_id=?",(saved,self.user_a)).fetchone())
 
     def test_database_backup_restore_includes_income_rules_and_occurrences(self):
-        today=date.today()
+        today=app.business_today()
         rule_id=app.save_income_rule(self.user_a,{"description":"Synthetic archived salary","income_type":"salary","amount":"4200","frequency":"monthly","start_on":today.isoformat()})
         app.income_overview(self.user_a,today.strftime("%Y-%m"),today)
         backup=app.create_backup()
@@ -808,7 +808,7 @@ class AppTest(unittest.TestCase):
 
     def test_database_backup_and_restore_preserve_records_and_create_recovery_copy(self):
         category,payment=self.category_and_method(self.user_a)
-        today=date.today().isoformat()
+        today=app.business_today().isoformat()
         app.save_expense(self.user_a,{"amount":"42.50","spent_on":today,"description":"Backup record","category_id":category,"payment_method_id":payment})
         app.save_budget(self.user_a,today[:7],"250")
         rule=app.save_recurring(self.user_a,{"description":"Backup recurring","amount":"15","category_id":category,"frequency":"monthly","start_on":today})
@@ -837,7 +837,7 @@ class AppTest(unittest.TestCase):
             recovery.close()
 
     def test_invalid_or_incompatible_backup_is_rejected_without_touching_live_database(self):
-        app.save_expense(self.user_a,{"amount":"11","spent_on":date.today().isoformat(),"description":"Keep this record"})
+        app.save_expense(self.user_a,{"amount":"11","spent_on":app.business_today().isoformat(),"description":"Keep this record"})
         original_bytes=app.DB_PATH.read_bytes()
         app.BACKUP_DIR.mkdir(mode=0o700)
         corrupt=app.BACKUP_DIR/"corrupt.sqlite3"
@@ -847,19 +847,19 @@ class AppTest(unittest.TestCase):
         incompatible=app.BACKUP_DIR/"incompatible.sqlite3"
         with sqlite3.connect(incompatible) as db:db.execute("CREATE TABLE users(id INTEGER)")
         with self.assertRaises(ValueError):app.restore_backup(incompatible)
-        self.assertEqual(app.summary(self.user_a,date.today().strftime("%Y-%m"))["spent_minor"],1100)
+        self.assertEqual(app.summary(self.user_a,app.business_today().strftime("%Y-%m"))["spent_minor"],1100)
         with self.assertRaises(ValueError):app.restore_backup(Path(self.temp.name)/"outside.sqlite3")
 
     def test_encrypted_backup_restores_and_creates_recovery_backup(self):
         key = base64.urlsafe_b64encode(b"k" * 32).decode()
         with patch.dict(os.environ, {"EXPENSE_BACKUP_KEY": key, "APP_ENV": "development"}):
-            app.save_expense(self.user_a,{"amount":"23.45","spent_on":date.today().isoformat(),"description":"Encrypted source"})
+            app.save_expense(self.user_a,{"amount":"23.45","spent_on":app.business_today().isoformat(),"description":"Encrypted source"})
             backup = app.create_backup(encrypted=True)
             self.assertTrue(backup.name.endswith(".sqlite3.enc"))
             self.assertTrue(backup.read_bytes().startswith(app.ENCRYPTED_BACKUP_MAGIC))
-            app.save_expense(self.user_a,{"amount":"7","spent_on":date.today().isoformat(),"description":"Later record"})
+            app.save_expense(self.user_a,{"amount":"7","spent_on":app.business_today().isoformat(),"description":"Later record"})
             result = app.restore_backup(backup)
-            self.assertEqual(app.summary(self.user_a,date.today().strftime("%Y-%m"))["spent_minor"],2345)
+            self.assertEqual(app.summary(self.user_a,app.business_today().strftime("%Y-%m"))["spent_minor"],2345)
             self.assertTrue(result["recovery_backup"].name.endswith(".sqlite3.enc"))
             decrypted = Path(self.temp.name) / "recovery-validation.sqlite3"
             app._decrypt_file(result["recovery_backup"], decrypted, b"k" * 32)
@@ -870,14 +870,14 @@ class AppTest(unittest.TestCase):
         temp_root = Path(tempfile.gettempdir())
         before = set(temp_root.glob("expense-private-*.sqlite3"))
         with patch.dict(os.environ, {"EXPENSE_BACKUP_KEY": key, "APP_ENV": "development"}):
-            app.save_expense(self.user_a,{"amount":"31.20","spent_on":date.today().isoformat(),"description":"Separate restore"})
+            app.save_expense(self.user_a,{"amount":"31.20","spent_on":app.business_today().isoformat(),"description":"Separate restore"})
             backup = app.create_backup(encrypted=True)
             alternate_db = Path(self.temp.name) / "separate" / "expenses.sqlite3"
             with patch.object(app, "DB_PATH", alternate_db):
                 result = app.restore_backup(backup)
                 self.assertIsNone(result["recovery_backup"])
                 self.assertTrue(app.validate_database(alternate_db))
-                self.assertEqual(app.summary(self.user_a,date.today().strftime("%Y-%m"))["spent_minor"],3120)
+                self.assertEqual(app.summary(self.user_a,app.business_today().strftime("%Y-%m"))["spent_minor"],3120)
         self.assertEqual(set(temp_root.glob("expense-private-*.sqlite3")), before)
 
     def test_wrong_key_tamper_and_truncation_reject_encrypted_restore_unchanged(self):
@@ -886,7 +886,7 @@ class AppTest(unittest.TestCase):
         temp_root = Path(tempfile.gettempdir())
         staging_before = set(temp_root.glob("expense-private-*.sqlite3"))
         with patch.dict(os.environ, {"EXPENSE_BACKUP_KEY": good_key, "APP_ENV": "development"}):
-            app.save_expense(self.user_a,{"amount":"19","spent_on":date.today().isoformat(),"description":"Protected current"})
+            app.save_expense(self.user_a,{"amount":"19","spent_on":app.business_today().isoformat(),"description":"Protected current"})
             original = app.DB_PATH.read_bytes()
             backup = app.create_backup(encrypted=True)
             backup_bytes = backup.read_bytes()
@@ -905,7 +905,7 @@ class AppTest(unittest.TestCase):
         temp_root = Path(tempfile.gettempdir())
         staging_before = set(temp_root.glob("expense-private-*.sqlite3"))
         with patch.dict(os.environ, {"EXPENSE_BACKUP_KEY":key, "APP_ENV":"development"}):
-            app.save_expense(self.user_a,{"amount":"8","spent_on":date.today().isoformat(),"description":"Keep current"})
+            app.save_expense(self.user_a,{"amount":"8","spent_on":app.business_today().isoformat(),"description":"Keep current"})
             original = app.DB_PATH.read_bytes()
             incompatible = Path(self.temp.name) / "incompatible.sqlite3"
             with sqlite3.connect(incompatible) as db:
@@ -918,7 +918,7 @@ class AppTest(unittest.TestCase):
         self.assertEqual(set(temp_root.glob("expense-private-*.sqlite3")), staging_before)
 
     def test_encryption_key_is_required_and_production_rejects_plaintext_restore(self):
-        app.save_expense(self.user_a,{"amount":"5","spent_on":date.today().isoformat(),"description":"Keep current"})
+        app.save_expense(self.user_a,{"amount":"5","spent_on":app.business_today().isoformat(),"description":"Keep current"})
         original = app.DB_PATH.read_bytes()
         with patch.dict(os.environ, {"EXPENSE_BACKUP_KEY":"", "APP_ENV":"development"}):
             with self.assertRaises(ValueError): app.create_backup(encrypted=True)
@@ -928,7 +928,7 @@ class AppTest(unittest.TestCase):
         self.assertEqual(app.DB_PATH.read_bytes(), original)
 
     def test_production_restore_command_rejects_plaintext_backup(self):
-        app.save_expense(self.user_a,{"amount":"4","spent_on":date.today().isoformat(),"description":"Keep current"})
+        app.save_expense(self.user_a,{"amount":"4","spent_on":app.business_today().isoformat(),"description":"Keep current"})
         original = app.DB_PATH.read_bytes()
         plain = app.create_backup()
         output = io.StringIO()
@@ -936,6 +936,24 @@ class AppTest(unittest.TestCase):
             self.assertEqual(app.main(["restore", str(plain)]), 1)
         self.assertIn("encrypted backup", output.getvalue())
         self.assertEqual(app.DB_PATH.read_bytes(), original)
+
+
+    def test_financial_dates_use_istanbul_when_utc_is_still_previous_month(self):
+        from datetime import datetime,timezone
+        class BoundaryClock(datetime):
+            @classmethod
+            def now(cls,tz=None):
+                point=datetime(2026,10,31,21,30,tzinfo=timezone.utc)
+                return point.astimezone(tz) if tz else point.replace(tzinfo=None)
+        with patch('app.datetime',BoundaryClock):
+            self.assertEqual(app.business_today(),date(2026,11,1))
+            category,method=self.category_and_method(self.user_a)
+            payload={'amount':'17.25','description':'Türkiye gününde harcama','spent_on':'2026-11-01','category_id':category,'payment_method_id':method}
+            self.assertTrue(app.save_expense(self.user_a,payload))
+            with self.assertRaises(ValueError):app.save_expense(self.user_a,{**payload,'spent_on':'2026-11-02'})
+            app.save_opening_cash(self.user_a,'100','2026-11-01')
+            self.assertTrue(app.add_cash_adjustment(self.user_a,'-17.25','2026-11-01','Bakiye farkı'))
+            with self.assertRaises(ValueError):app.add_cash_adjustment(self.user_a,'1','2026-11-02','Gelecek gün')
 
 
 class HttpApiTest(unittest.TestCase):
@@ -1026,8 +1044,8 @@ class HttpApiTest(unittest.TestCase):
             other_id=app.create_user("invitation-other@example.invalid","local-api-test-pass")
             options=app.user_options(other_id)
             category=options["categories"][0]["id"]
-            app.save_expense(other_id,{"amount":"42","spent_on":date.today().isoformat(),"description":"private other record","category_id":category})
-            self.assertEqual(client.get("/api/expenses?month="+date.today().strftime("%Y-%m")).get_json(),[])
+            app.save_expense(other_id,{"amount":"42","spent_on":app.business_today().isoformat(),"description":"private other record","category_id":category})
+            self.assertEqual(client.get("/api/expenses?month="+app.business_today().strftime("%Y-%m")).get_json(),[])
             self.assertEqual(client.post("/api/categories",json={"name":"CSRF blocked"}).status_code,403)
             self.assertIsNotNone(app.session_user(client.get_cookie(app.COOKIE).value))
             self.assertNotEqual(owner_id,other_id)
@@ -1040,21 +1058,21 @@ class HttpApiTest(unittest.TestCase):
         self.assertNotEqual([c["id"] for c in opts_a["categories"]],[c["id"] for c in opts_b["categories"]])
         category_a=opts_a["categories"][0]["id"]
         category_b=opts_b["categories"][0]["id"]
-        payload={"amount":"35.75","spent_on":date.today().isoformat(),"description":"API isolation","category_id":category_a}
+        payload={"amount":"35.75","spent_on":app.business_today().isoformat(),"description":"API isolation","category_id":category_a}
         self.assertEqual(self.request(self.a,"/api/expenses","POST",payload)[0],403)
         code,saved=self.request(self.a,"/api/expenses","POST",payload,self.csrf_a)
         self.assertEqual(code,200)
-        self.assertEqual(self.request(self.b,"/api/expenses?month="+date.today().strftime("%Y-%m"))[1],[])
+        self.assertEqual(self.request(self.b,"/api/expenses?month="+app.business_today().strftime("%Y-%m"))[1],[])
         self.assertEqual(self.request(self.b,f"/api/expenses","POST",{**payload,"id":saved["id"]},self.csrf_b)[0],404)
         self.assertEqual(self.request(self.b,f"/api/expenses/{saved['id']}","DELETE",{},self.csrf_b)[0],404)
-        self.assertEqual(self.request(self.a,"/api/budgets","POST",{"month":date.today().strftime("%Y-%m"),"amount":"100","category_id":category_b},self.csrf_a)[0],400)
-        self.assertEqual(self.request(self.a,"/api/budgets","POST",{"month":date.today().strftime("%Y-%m"),"amount":"0"},self.csrf_a)[0],200)
-        summary_code,summary_data=self.request(self.a,"/api/summary?month="+date.today().strftime("%Y-%m"))
+        self.assertEqual(self.request(self.a,"/api/budgets","POST",{"month":app.business_today().strftime("%Y-%m"),"amount":"100","category_id":category_b},self.csrf_a)[0],400)
+        self.assertEqual(self.request(self.a,"/api/budgets","POST",{"month":app.business_today().strftime("%Y-%m"),"amount":"0"},self.csrf_a)[0],200)
+        summary_code,summary_data=self.request(self.a,"/api/summary?month="+app.business_today().strftime("%Y-%m"))
         self.assertEqual(summary_code,200)
         self.assertEqual(summary_data["remaining_minor"],-3575)
-        self.assertEqual(self.request(self.b,"/api/budgets","POST",{"month":date.today().strftime("%Y-%m"),"amount":"100"},self.csrf_b)[0],200)
-        self.assertEqual(self.request(self.b,"/api/summary?month="+date.today().strftime("%Y-%m"))[1]["budget_minor"],10000)
-        self.assertEqual(self.request(self.a,"/api/summary?month="+date.today().strftime("%Y-%m"))[1]["budget_minor"],0)
+        self.assertEqual(self.request(self.b,"/api/budgets","POST",{"month":app.business_today().strftime("%Y-%m"),"amount":"100"},self.csrf_b)[0],200)
+        self.assertEqual(self.request(self.b,"/api/summary?month="+app.business_today().strftime("%Y-%m"))[1]["budget_minor"],10000)
+        self.assertEqual(self.request(self.a,"/api/summary?month="+app.business_today().strftime("%Y-%m"))[1]["budget_minor"],0)
         self.assertEqual(self.request(self.a,"/api/categories","POST",{"name":"Audit kategori"},self.csrf_a)[0],201)
         self.assertNotIn("Audit kategori",[category["name"] for category in self.request(self.b,"/api/options")[1]["categories"]])
         self.assertEqual(self.request(self.a,f"/api/expenses/{saved['id']}","DELETE",{},self.csrf_a)[0],200)
@@ -1066,14 +1084,14 @@ class HttpApiTest(unittest.TestCase):
         code,card=self.request(self.a,"/api/cards","POST",payload,self.csrf_a)
         self.assertEqual(code,200)
         self.assertEqual(self.request(self.b,f"/api/cards/{card['id']}/statements")[0],404)
-        self.assertEqual(self.request(self.a,"/api/expenses","POST",{"amount":"12","spent_on":date.today().isoformat(),"description":"Card expense","card_id":card["id"]},self.csrf_a)[0],200)
-        plan_code,_=self.request(self.a,"/api/expenses","POST",{"amount":"10","spent_on":date.today().isoformat(),"description":"Card installments","card_id":card["id"],"installments_count":3,"first_installment_on":date.today().isoformat()},self.csrf_a)
+        self.assertEqual(self.request(self.a,"/api/expenses","POST",{"amount":"12","spent_on":app.business_today().isoformat(),"description":"Card expense","card_id":card["id"]},self.csrf_a)[0],200)
+        plan_code,_=self.request(self.a,"/api/expenses","POST",{"amount":"10","spent_on":app.business_today().isoformat(),"description":"Card installments","card_id":card["id"],"installments_count":3,"first_installment_on":app.business_today().isoformat()},self.csrf_a)
         self.assertEqual(plan_code,200)
         self.assertEqual(len(self.request(self.a,"/api/installments")[1]),3)
         statements=self.request(self.a,f"/api/cards/{card['id']}/statements")[1]
         self.assertEqual(len(statements),3)
         self.assertEqual(self.request(self.b,f"/api/cards/{card['id']}/repayments","POST",{"amount":"1"},self.csrf_b)[0],404)
-        self.assertEqual(self.request(self.a,f"/api/cards/{card['id']}/repayments","POST",{"amount":"2","paid_on":date.today().isoformat()},self.csrf_a)[0],200)
+        self.assertEqual(self.request(self.a,f"/api/cards/{card['id']}/repayments","POST",{"amount":"2","paid_on":app.business_today().isoformat()},self.csrf_a)[0],200)
         self.assertEqual(self.request(self.a,"/api/register","POST",[])[0],400)
 
     def test_login_rate_limit_is_per_source_and_successful_login_remains_available(self):
@@ -1206,7 +1224,7 @@ class HttpApiTest(unittest.TestCase):
         self.assertEqual(self.request(self.a,"/api/import/preview","POST",{"csv":csv_text})[0],403)
 
     def test_recurring_api_enforces_ownership_and_csrf_and_occurrence_is_idempotent(self):
-        today=date.today().isoformat()
+        today=app.business_today().isoformat()
         payload={"description":"API recurring","amount":"30.00","frequency":"monthly","start_on":today}
         self.assertEqual(self.request(self.a,"/api/recurring","POST",payload)[0],403)
         code,created=self.request(self.a,"/api/recurring","POST",payload,self.csrf_a)
@@ -1227,7 +1245,7 @@ class HttpApiTest(unittest.TestCase):
         self.assertEqual(self.request(self.b,"/api/expenses?month="+today[:7])[1],[])
 
     def test_income_api_requires_csrf_and_isolates_records_rules_and_actions(self):
-        today=date.today(); month=today.strftime("%Y-%m")
+        today=app.business_today(); month=today.strftime("%Y-%m")
         payload={"description":"Synthetic refund","income_type":"refund","amount":"99,95","expected_on":(today+timedelta(days=2)).isoformat()}
         self.assertEqual(self.request(self.a,"/api/income","POST",payload)[0],403)
         status,created=self.request(self.a,"/api/income","POST",payload,self.csrf_a)
@@ -1262,7 +1280,7 @@ class HttpApiTest(unittest.TestCase):
         self.assertIn("Other user's income",other_csv)
 
     def test_cash_planning_api_requires_csrf_and_isolates_calendar_and_adjustments(self):
-        today=date.today(); tomorrow=(today+timedelta(days=1)).isoformat()
+        today=app.business_today(); tomorrow=(today+timedelta(days=1)).isoformat()
         self.assertEqual(self.request(self.a,"/api/cash-position")[1]["configured"],False)
         self.assertEqual(self.request(self.a,"/api/cash-position","PUT",{"amount":"500","effective_on":today.isoformat()})[0],403)
         self.assertEqual(self.request(self.a,"/api/cash-position","PUT",{"amount":"500","effective_on":today.isoformat()},self.csrf_a)[0],200)
@@ -1283,7 +1301,7 @@ class HttpApiTest(unittest.TestCase):
         self.assertEqual(self.request(self.a,"/api/cash-flow")[0],200)
 
     def test_account_deletion_requires_password_and_confirmation_and_cascades_only_owner(self):
-        today=date.today().isoformat()
+        today=app.business_today().isoformat()
         user_a=self.request(self.a,"/api/session")[1]["user_id"]
         options_a=self.request(self.a,"/api/options")[1]
         options_b=self.request(self.b,"/api/options")[1]

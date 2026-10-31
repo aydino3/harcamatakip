@@ -339,7 +339,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         session, error = auth()
         if error:
             return error
-        month = request.args.get("month", date.today().strftime("%Y-%m"))
+        month = request.args.get("month", core.business_today().strftime("%Y-%m"))
         try:
             return jsonify(core.summary(session["user_id"], month))
         except ValueError:
@@ -374,8 +374,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     def payment_calendar_route():
         session,error=auth()
         if error:return error
-        start=request.args.get("start",date.today().isoformat())
-        end=request.args.get("end",(date.today()+core.timedelta(days=60)).isoformat())
+        start=request.args.get("start",core.business_today().isoformat())
+        end=request.args.get("end",(core.business_today()+core.timedelta(days=60)).isoformat())
         try: rows=core.payment_calendar(session["user_id"],start,end)
         except (ValueError,TypeError,OverflowError):return json_error("Takvim tarih aralığını kontrol edin (en fazla 367 gün).",400)
         event_type=request.args.get("type")
@@ -405,7 +405,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         session, error = auth()
         if error:
             return error
-        month = request.args.get("month", date.today().strftime("%Y-%m"))
+        month = request.args.get("month", core.business_today().strftime("%Y-%m"))
         try:
             return jsonify(core.income_overview(session["user_id"], month))
         except (ValueError, TypeError, *core._DB_INTEGRITY_ERRORS):
@@ -494,7 +494,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         session, error = auth()
         if error:
             return error
-        month = request.args.get("month", date.today().strftime("%Y-%m"))
+        month = request.args.get("month", core.business_today().strftime("%Y-%m"))
         try:
             start, end = core.month_bounds(month)
         except ValueError:

@@ -1,6 +1,5 @@
 """Gelir ve kullanıcı tarafından girilen ödeme günlerinden salt okunur nakit planı."""
-from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, timedelta
 import calendar
 import card_schedule
 from contextlib import nullcontext
@@ -9,7 +8,7 @@ import app as core
 
 
 def today():
-    return datetime.now(ZoneInfo("Europe/Istanbul")).date()
+    return core.business_today()
 
 
 def payment_dates(rule, start, end):
