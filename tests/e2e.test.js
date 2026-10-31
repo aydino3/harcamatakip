@@ -96,3 +96,17 @@ test('Ödemeler Ekim kesimini gösterirken kaydet ve Ödedim Kasım borcuna işl
   await page.locator('nav [data-section=overview]').click();await page.locator('.statement-spending-report .extra-total-summary strong').getByText('250,00 ₺',{exact:true}).waitFor();
  }finally{await context.close()}
 });
+
+test('Hafta sonu ay sonu geliri pazartesiye geçer; Alındı aynı dönemi ikinci kez eklemez',async()=>{
+ const context=await browser.newContext({viewport:{width:390,height:900}}),page=await context.newPage();
+ try{
+  const auth=await(await context.request.post(url+'/api/register',{data:{email:'weekend-income-e2e@example.invalid',username:'weekend-income-e2e',password:'synthetic-weekend-password'}})).json(),headers={'X-CSRF-Token':auth.csrf};
+  assert.equal((await context.request.post(url+'/api/simple-income',{headers,data:{description:'Hafta sonu maaşı',amount:'100',frequency:'monthly',schedule_mode:'last_day',start_month:'2024-03',end_on:'2024-03-31',request_key:'weekend-e2e-income-01'}})).status(),200);
+  assert.equal((await context.request.put(url+'/api/simple-opening',{headers,data:{amount:'500',effective_on:'2024-03-01',auto_income_on_due:1}})).status(),200);
+  await page.goto(url);await page.getByRole('heading',{name:'Gelir ve ödeme takvimi'}).waitFor();await page.locator('#overview-month').fill('2024-03');await page.getByRole('heading',{name:'Mart 2024',exact:true}).waitFor();assert.equal(await page.locator('.planned-row').filter({hasText:'Hafta sonu maaşı'}).count(),0);
+  await page.locator('#overview-month').fill('2024-04');const row=page.locator('.planned-row').filter({hasText:'Hafta sonu maaşı'});await row.getByText(/01.04.2024/).waitFor();assert.equal(await row.count(),1);
+  await row.getByRole('button',{name:'Alındı',exact:true}).click();await page.locator('#received-form [name=received_on]').fill('2024-04-01');await page.locator('#received-form button[type=submit]').click();await page.locator('#received-dialog').waitFor({state:'hidden'});assert.equal(await row.count(),1);
+  const snapshot=await(await context.request.get(url+'/api/simple-cashflow?start=2024-04-01&end=2024-04-30')).json();assert.equal(snapshot.cash_position.balance_minor,'60000');assert.equal(snapshot.events.filter(r=>r.kind==='income').length,1);assert.equal(snapshot.income_records[0].expected_on,'2024-03-31');assert.equal(snapshot.income_records[0].received_on,'2024-04-01');
+  await page.locator('nav [data-section=income]').click();await page.getByText(/Ay sonu; hafta sonuysa pazartesi/).waitFor();
+ }finally{await context.close()}
+});

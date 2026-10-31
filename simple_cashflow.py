@@ -77,6 +77,11 @@ def read_data(user_id,connection=None):
     return _visible_records(data,user_id,connection)
 
 
+def income_record_expected_date(data, record):
+    rule = next((row for row in data["income_rules"] if row["id"] == record["rule_id"]), None)
+    return core.income_expected_date(rule, record["expected_on"])
+
+
 def income_events(data,start_value,end_value,as_of):
     start,end=date.fromisoformat(start_value),date.fromisoformat(end_value)
     events=[]
@@ -95,23 +100,26 @@ def income_events(data,start_value,end_value,as_of):
             add(f"income:{row['id']}",row["received_on"],row["amount_minor"],row["description"],"income","received",record_id=row["id"],expected_on=row["expected_on"])
         elif row["status"]=="expected":
             if row["rule_id"] is not None and rules.get(row["rule_id"],{}).get("status")!="active":continue
-            add(f"income:{row['id']}",row["expected_on"],row["amount_minor"],row["description"],"income","received" if automatic and row["expected_on"]<=as_of.isoformat() else "overdue" if row["expected_on"]<as_of.isoformat() else "expected",record_id=row["id"],auto_received=automatic and row["expected_on"]<=as_of.isoformat())
+            expected = income_record_expected_date(data, row)
+            add(f"income:{row['id']}",expected,row["amount_minor"],row["description"],"income","received" if automatic and expected<=as_of.isoformat() else "overdue" if expected<as_of.isoformat() else "expected",record_id=row["id"],scheduled_on=row["expected_on"],auto_received=automatic and expected<=as_of.isoformat())
     for rule in rules.values():
         if rule["status"]!="active":
             continue
         first=date.fromisoformat(rule["start_on"])
         last=date.fromisoformat(rule["end_on"]) if rule["end_on"] else None
-        index=core.income_recurrence_index(first,rule["frequency"],max(start,first),rule["schedule_mode"])
+        index=core.income_recurrence_index(first,rule["frequency"],max(core.income_lookback_start(start),first),rule["schedule_mode"])
         prices=[row for row in data["income_rule_amounts"] if row["rule_id"]==rule["id"]]
         while True:
             due=core.income_recurrence_date(first,rule["frequency"],index,rule["schedule_mode"])
             if due>end or last and due>last:
                 break
-            key=(rule["id"],due.isoformat())
+            nominal=due
+            key=(rule["id"],nominal.isoformat())
+            expected=date.fromisoformat(core.income_expected_date(rule,nominal.isoformat()))
             eligible=[row for row in prices if row["effective_on"]<=due.isoformat()]
-            if due>=start and eligible and key not in actual_income_keys:
+            if expected>=start and eligible and key not in actual_income_keys:
                 amount=max(eligible,key=lambda row:row["effective_on"])["amount_minor"]
-                add(f"income-rule:{rule['id']}:{due}",due.isoformat(),amount,rule["description"],"income","received" if automatic and due<=as_of else "overdue" if due<as_of else "expected",rule_id=rule["id"],scheduled_on=due.isoformat(),auto_received=automatic and due<=as_of)
+                add(f"income-rule:{rule['id']}:{nominal}",expected.isoformat(),amount,rule["description"],"income","received" if automatic and expected<=as_of else "overdue" if expected<as_of else "expected",rule_id=rule["id"],scheduled_on=nominal.isoformat(),auto_received=automatic and expected<=as_of)
             index+=1
     return events
 
@@ -188,7 +196,7 @@ def overview(user_id,start_value,end_value):
     result=calculate(data,start_value,end_value)
     result["rules"]=[{**rule,"revision":rule_revision(rule),"deletion_revision":managed_revision(data,"payment_plan",rule["id"]),"display_start_on":payment_due(data,rule,rule["start_on"]),"display_end_on":payment_due(data,rule,rule["end_on"]) if rule["end_on"] else None,"has_paid":any(row["recurring_id"]==rule["id"] for row in data["payment_events"]+data["occurrences"]),"scheduled_total_minor":str(sum(int(rule["amount_minor"]) for _ in payment_dates(rule,date.fromisoformat(start_value),date.fromisoformat(end_value))) if rule["status"]=="active" else 0)} for rule in data["recurring"]]
     result["income_rules"]=[{**row,"revision":managed_revision(data,"income_rule",row["id"]),"amount_minor":str(income_rule_price(data,row)),"has_receipts":any(item["rule_id"]==row["id"] and item["status"]=="received" for item in data["income_records"])} for row in data["income_rules"]]
-    result["income_records"]=[{**row,"cash_recognized_on":row["expected_on"] if (data.get("opening") or {}).get("auto_income_on_due") and row["status"]=="expected" and row["expected_on"]<=today().isoformat() else None,"revision":managed_revision(data,"income_record",row["id"])} for row in data["income_records"]]
+    result["income_records"]=[{**row,"display_expected_on":income_record_expected_date(data,row),"cash_recognized_on":income_record_expected_date(data,row) if (data.get("opening") or {}).get("auto_income_on_due") and row["status"]=="expected" and income_record_expected_date(data,row)<=today().isoformat() else None,"revision":managed_revision(data,"income_record",row["id"])} for row in data["income_records"]]
     result["income_rule_amounts"]=data["income_rule_amounts"]
     result['cash_position']=cash_position(data)
     projection=projected_balance(data,end_value)
@@ -1002,6 +1010,8 @@ def edit_simple_income(user_id,payload):
         if payload.get('revision')!=managed_revision(data,kind,record_id):raise Conflict('Gelir başka bir ekranda değişti. Listeyi yenileyin.')
         if category and not db.execute('SELECT 1 FROM categories WHERE user_id=? AND id=?',(user_id,category)).fetchone():raise ValueError('Kategori hesabınıza ait olmalı.')
         if kind=='income_record':
+            if row['rule_id'] is not None and expected.isoformat()==income_record_expected_date(data,row):
+                expected=date.fromisoformat(row['expected_on'])
             if row['rule_id'] is not None and expected.isoformat()!=row['expected_on']:
                 db.execute('UPDATE income_records SET rule_id=NULL WHERE user_id=? AND id=?',(user_id,record_id))
                 db.execute("INSERT INTO income_records(user_id,description,income_type,amount_minor,expected_on,status,rule_id) VALUES(?,?,?,?,?,'cancelled',?)",(user_id,row['description'],row['income_type'],row['amount_minor'],row['expected_on'],row['rule_id']))

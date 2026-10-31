@@ -366,3 +366,5 @@ EXPENSE_DB_PATH=/tmp/kvkk-preview.sqlite3 APP_ENV=development PRIVATE_BETA=0 pyt
 ```
 
 Yerel önizleme canlı DB URL'lerini reddeder. Testler: `python -m unittest discover -s tests -p 'test_privacy_notice*.py' -v`; native PostgreSQL testleri mevcut `FINANCE_TEST_POSTGRES_BIN_DIR` ile çalışır. `npm run test:e2e` hem mali akışları hem izole KVKK kayıt/giriş ekranını kapsar.
+
+Ayın son günü (`monthly` + `last_day`) seçili düzenli gelirlerin beklenen tarihi cumartesi/pazara denk gelirse sonraki pazartesidir. Örneğin 31 Ekim 2026 → 2 Kasım 2026. Takvim, aylık gelir toplamları, otomatik nakit tanıma ve öneriler bu beklenen tarihi kullanır; haftalık, belirli günlü aylık ve tek seferlik gelirler değişmez. Kaydın nominal dönem anahtarı korunur; önceki Alındı kayıtları gerçek tahsilat tarihinde kalır ve ikinci gelir oluşmaz. Dönemin son ayındaki gelir hafta sonu nedeniyle sonraki aya taşsa da o dönemin hakkı olarak bir kez planlanır. Bu kural yalnız hafta sonunu ele alır; resmî tatil takvimi kullanmaz.

@@ -126,3 +126,8 @@ test('Kesim günü eksik kartta dönem tahmin edilmez; borç ve Ödedim işlemi 
  const html=vm.runInContext('extraSpendingMarkup()',ctx);assert.match(html,/Ekstre kesim günü eksik/);assert.match(html,/Eksik bilgi/);assert.doesNotMatch(html,/data-card-total="card:4"|data-pay=/);
  assert.throws(()=>vm.runInContext("saveStatementTotal(paymentStatementCard('card:4'),'100',0)",ctx),/Ekstre kesim günü eksik/);
 });
+
+test('Ay sonu gelir kaydında gerçek beklenen pazartesi gösterilir, dönem anahtarı gösterilmez',()=>{
+ const ctx=context(async()=>response({}));ctx.record={id:1,rule_id:2,description:'Ay sonu',amount_minor:'10000',status:'expected',expected_on:'2024-03-31',display_expected_on:'2024-04-01'};
+ const html=vm.runInContext("incomeManagementRow(record,'income_record')",ctx);assert.match(html,/Bekleniyor · 01.04.2024/);assert.doesNotMatch(html,/31.03.2024/);
+});

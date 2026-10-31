@@ -63,7 +63,7 @@ def analyze(data, month, as_of=None):
     late_income={row['id']:row for row in events if row['kind']=='income' and row['status']!='received' and row['date']<as_of.isoformat()}
     if not (data.get('opening') or {}).get('auto_income_on_due'):
         for row in data.get('income_records',[]):
-            if row['status']=='expected' and row['expected_on']<as_of.isoformat():late_income['record:'+str(row['id'])]={'amount_minor':int(row['amount_minor'])}
+            if row['status']=='expected' and finance.income_record_expected_date(data,row)<as_of.isoformat():late_income['record:'+str(row['id'])]={'amount_minor':int(row['amount_minor'])}
         # Materialized events use income:<id>; count the record once.
         actual_ids={row.get('record_id') for row in events if row['kind']=='income' and row['date']<as_of.isoformat()}
         for identity,row in list(late_income.items()):

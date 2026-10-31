@@ -1237,6 +1237,21 @@ def income_recurrence_date(start_on: date, frequency: str, index: int, schedule_
     return date(year, start_on.month, min(start_on.day, calendar.monthrange(year, start_on.month)[1]))
 
 
+def income_lookback_start(value: date) -> date:
+    """Include a weekend month-end that arrives in the next reporting month."""
+    return date.fromordinal(max(1, value.toordinal() - 2))
+
+
+def income_expected_date(rule, scheduled_on: str) -> str:
+    """Move month-end cash arrival to Monday; keep the nominal occurrence key stable."""
+    if not rule or rule["frequency"] != "monthly" or rule["schedule_mode"] != "last_day":
+        return scheduled_on
+    nominal = date.fromisoformat(scheduled_on)
+    if nominal.day == calendar.monthrange(nominal.year, nominal.month)[1] and nominal.weekday() >= 5:
+        return (nominal + timedelta(days=7 - nominal.weekday())).isoformat()
+    return scheduled_on
+
+
 def income_recurrence_index(start_on: date, frequency: str, target: date, schedule_mode="anchored") -> int:
     if target <= start_on:
         return 0
@@ -1394,9 +1409,9 @@ def income_totals(user_id: int, month: str, as_of: date | None = None):
     start, end = month_bounds(month)
     as_of = as_of or date.today()
     with connect() as db:
-        rows = db.execute("SELECT r.amount_minor,r.status,r.expected_on,r.received_on FROM income_records r LEFT JOIN income_rules q ON q.id=r.rule_id AND q.user_id=r.user_id WHERE r.user_id=? AND r.status!='cancelled' AND (r.rule_id IS NULL OR q.status='active') AND ((r.status='received' AND r.received_on>=? AND r.received_on<?) OR (r.status='expected' AND r.expected_on>=? AND r.expected_on<?))", (user_id,start,end,start,end)).fetchall()
+        rows = db.execute("SELECT r.amount_minor,r.status,r.expected_on,r.received_on,q.frequency,q.schedule_mode FROM income_records r LEFT JOIN income_rules q ON q.id=r.rule_id AND q.user_id=r.user_id WHERE r.user_id=? AND r.status!='cancelled' AND (r.rule_id IS NULL OR q.status='active') AND ((r.status='received' AND r.received_on>=? AND r.received_on<?) OR (r.status='expected' AND r.expected_on>=? AND r.expected_on<?))", (user_id,start,end,income_lookback_start(date.fromisoformat(start)).isoformat(),end)).fetchall()
     received = sum(int(row["amount_minor"]) for row in rows if row["status"] == "received")
-    expected = sum(int(row["amount_minor"]) for row in rows if row["status"] == "expected" and row["expected_on"] >= as_of.isoformat())
+    expected = sum(int(row["amount_minor"]) for row in rows if row["status"] == "expected" and start <= income_expected_date(row, row["expected_on"]) < end and income_expected_date(row, row["expected_on"]) >= as_of.isoformat())
     return {"received_minor": received, "expected_minor": expected}
 
 
@@ -1414,7 +1429,7 @@ def income_overview(user_id: int, month: str, as_of: date | None = None):
                 continue
             start_on = date.fromisoformat(rule["start_on"])
             end_on = date.fromisoformat(rule["end_on"]) if rule["end_on"] else None
-            from_date = max(start_on, window_start)
+            from_date = max(start_on, income_lookback_start(window_start))
             index = income_recurrence_index(start_on, rule["frequency"], from_date, rule["schedule_mode"])
             while True:
                 try:
@@ -1423,19 +1438,26 @@ def income_overview(user_id: int, month: str, as_of: date | None = None):
                     break
                 if occurrence >= window_end or end_on and occurrence > end_on:
                     break
-                if occurrence >= window_start:
+                if window_start.isoformat() <= income_expected_date(rule, occurrence.isoformat()) < window_end.isoformat():
                     amount_row = db.execute("SELECT amount_minor FROM income_rule_amounts WHERE user_id=? AND rule_id=? AND effective_on<=? ORDER BY effective_on DESC LIMIT 1", (user_id, rule["id"], occurrence.isoformat())).fetchone()
                     if amount_row:
                         db.execute("INSERT OR IGNORE INTO income_records(user_id,rule_id,category_id,income_type,description,amount_minor,expected_on) VALUES(?,?,?,?,?,?,?)",
                                    (user_id, rule["id"], rule["category_id"], rule["income_type"], rule["description"], amount_row["amount_minor"], occurrence.isoformat()))
                 index += 1
-        rows = db.execute("SELECT r.*,u.status status_rule,c.name category FROM income_records r LEFT JOIN income_rules u ON u.id=r.rule_id AND u.user_id=r.user_id LEFT JOIN categories c ON c.id=r.category_id AND c.user_id=r.user_id WHERE r.user_id=? AND r.expected_on>=? AND r.expected_on<? ORDER BY r.expected_on,r.id", (user_id,month_start,window_end.isoformat())).fetchall()
+        rows = db.execute("SELECT r.*,u.status status_rule,u.frequency rule_frequency,u.schedule_mode rule_schedule_mode,c.name category FROM income_records r LEFT JOIN income_rules u ON u.id=r.rule_id AND u.user_id=r.user_id LEFT JOIN categories c ON c.id=r.category_id AND c.user_id=r.user_id WHERE r.user_id=? AND r.expected_on>=? AND r.expected_on<? ORDER BY r.expected_on,r.id", (user_id,income_lookback_start(window_start).isoformat(),window_end.isoformat())).fetchall()
         rules = db.execute("SELECT q.*, (SELECT amount_minor FROM income_rule_amounts a WHERE a.rule_id=q.id AND a.user_id=q.user_id AND a.effective_on<=? ORDER BY a.effective_on DESC LIMIT 1) amount_minor, (SELECT amount_minor FROM income_rule_amounts a WHERE a.rule_id=q.id AND a.user_id=q.user_id AND a.effective_on>? ORDER BY a.effective_on LIMIT 1) next_amount_minor, (SELECT effective_on FROM income_rule_amounts a WHERE a.rule_id=q.id AND a.user_id=q.user_id AND a.effective_on>? ORDER BY a.effective_on LIMIT 1) next_effective_on FROM income_rules q WHERE user_id=? ORDER BY status,description", (as_of.isoformat(), as_of.isoformat(), as_of.isoformat(), user_id)).fetchall()
     records=[]
     for raw in rows:
         item=dict(raw)
         item.pop("status_rule",None)
         item["category"] = item.get("category") or ""
+        item["scheduled_on"] = item["expected_on"]
+        if item["status"] != "received":
+            item["expected_on"] = income_expected_date({"frequency": raw["rule_frequency"], "schedule_mode": raw["rule_schedule_mode"]}, item["expected_on"])
+        if not month_start <= item["expected_on"] < window_end.isoformat():
+            continue
+        item.pop("rule_frequency", None)
+        item.pop("rule_schedule_mode", None)
         if item["rule_id"] and item.get("status") == "expected":
             rule_status = raw["status_rule"]
             if rule_status != "active":
@@ -1531,13 +1553,14 @@ def payment_calendar(user_id: int, start_value: str, end_value: str, as_of: date
     for month in _month_range(start,end):
         income_overview(user_id,month,as_of)
     with connect() as db:
-        income_rows = db.execute("SELECT r.id,r.amount_minor,r.expected_on,r.received_on,r.status,r.rule_id,r.description,r.income_type,q.status rule_status FROM income_records r LEFT JOIN income_rules q ON q.id=r.rule_id AND q.user_id=r.user_id WHERE r.user_id=? AND ((r.status='received' AND r.received_on>=? AND r.received_on<?) OR (r.status!='received' AND r.expected_on>=? AND r.expected_on<?)) ORDER BY COALESCE(r.received_on,r.expected_on),r.id", (user_id,start_text,end_exclusive,start_text,end_exclusive)).fetchall()
+        income_rows = db.execute("SELECT r.id,r.amount_minor,r.expected_on,r.received_on,r.status,r.rule_id,r.description,r.income_type,q.status rule_status,q.frequency,q.schedule_mode FROM income_records r LEFT JOIN income_rules q ON q.id=r.rule_id AND q.user_id=r.user_id WHERE r.user_id=? AND ((r.status='received' AND r.received_on>=? AND r.received_on<?) OR (r.status!='received' AND r.expected_on>=? AND r.expected_on<?)) ORDER BY COALESCE(r.received_on,r.expected_on),r.id", (user_id,start_text,end_exclusive,income_lookback_start(start).isoformat(),end_exclusive)).fetchall()
     for row in income_rows:
-        event_date = row["received_on"] if row["status"] == "received" else row["expected_on"]
+        event_date = row["received_on"] if row["status"] == "received" else income_expected_date(row, row["expected_on"])
+        if not start_text <= event_date < end_exclusive: continue
         status = row["status"]
         if row["status"]=="expected" and row["rule_id"] and row["rule_status"]!="active": status=row["rule_status"] or "cancelled"
         if status == "expected" and event_date < as_of.isoformat(): status = "overdue"
-        add(event_date,row["amount_minor"],row["description"],status,"income","income",row["id"],cash_effect_minor=int(row["amount_minor"]) if status in ("received","expected") else 0,income_type=row["income_type"],expected_on=row["expected_on"],received_on=row["received_on"])
+        add(event_date,row["amount_minor"],row["description"],status,"income","income",row["id"],cash_effect_minor=int(row["amount_minor"]) if status in ("received","expected") else 0,income_type=row["income_type"],expected_on=event_date if row["status"]!="received" else row["expected_on"],scheduled_on=row["expected_on"],received_on=row["received_on"])
 
     completed_keys = {(row["recurring_id"],row["scheduled_on"]) for row in occurrence_rows}
     for rule in rule_rows:
@@ -1644,7 +1667,7 @@ def cash_flow_forecast(user_id: int, start_value: str | None = None, end_value: 
 def export_income_csv(user_id: int) -> str:
     """Export only the caller's income records; recurring rules stay in the app."""
     with connect() as db:
-        rows=db.execute("SELECT income_type,description,amount_minor,expected_on,received_on,status,note FROM income_records WHERE user_id=? ORDER BY expected_on,id",(user_id,)).fetchall()
+        rows=db.execute("SELECT r.income_type,r.description,r.amount_minor,r.expected_on,r.received_on,r.status,r.note,q.frequency,q.schedule_mode FROM income_records r LEFT JOIN income_rules q ON q.id=r.rule_id AND q.user_id=r.user_id WHERE r.user_id=? ORDER BY r.expected_on,r.id",(user_id,)).fetchall()
     out=io.StringIO(newline="")
     writer=csv.writer(out,delimiter=";",lineterminator="\r\n")
     writer.writerow(["Tür","Açıklama","Tutar","Beklenen tarih","Alınma tarihi","Durum","Not"])
@@ -1654,7 +1677,7 @@ def export_income_csv(user_id: int) -> str:
     for row in rows:
         minor=int(row["amount_minor"])
         amount=f"{minor//100},{minor%100:02d}"
-        writer.writerow([safe(row["income_type"]),safe(row["description"]),amount,row["expected_on"],row["received_on"] or "",row["status"],safe(row["note"])])
+        writer.writerow([safe(row["income_type"]),safe(row["description"]),amount,income_expected_date(row,row["expected_on"]) if row["status"]=="expected" else row["expected_on"],row["received_on"] or "",row["status"],safe(row["note"])])
     return "\ufeff"+out.getvalue()
 
 

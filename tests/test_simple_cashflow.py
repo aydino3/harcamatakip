@@ -43,8 +43,8 @@ class SimpleCashflowTest(unittest.TestCase):
         self.assertEqual([r['date'] for r in finance.overview(self.user,'2024-01-01','2024-01-23')['events']],['2024-01-02','2024-01-09','2024-01-16','2024-01-23'])
         payload={'description':'Ay sonu','amount':'200','start_month':'2024-01','frequency':'monthly','schedule_mode':'last_day','request_key':'lastday-income-key-01'}
         self.assertEqual(finance.save_monthly_income(self.user,payload),finance.save_monthly_income(self.user,payload))
-        rows=[r['date'] for r in finance.overview(self.user,'2024-01-01','2024-03-31')['events'] if r['description']=='Ay sonu']
-        self.assertEqual(rows,['2024-01-31','2024-02-29','2024-03-31'])
+        rows=[r['date'] for r in finance.overview(self.user,'2024-01-01','2024-04-01')['events'] if r['description']=='Ay sonu']
+        self.assertEqual(rows,['2024-01-31','2024-02-29','2024-04-01'])
         with self.assertRaises(ValueError):finance.save_monthly_income(self.user,{**weekly,'schedule_mode':'last_day'})
 
     def test_card_oneoff_uses_owned_due_date_and_does_not_repeat_or_double_count(self):
@@ -793,3 +793,101 @@ class SimpleCashflowTest(unittest.TestCase):
             db.execute('INSERT INTO card_statements(user_id,card_id,period_start,closing_on,due_on) VALUES(?,?,?,?,?)',(self.user,legacy,'2024-10-02','2024-10-29','2024-10-30'))
         report=finance.card_statement_spending(finance.read_data(self.user),'2024-10')
         self.assertFalse(report['complete']);self.assertTrue(report['cards'][0]['inconsistent']);self.assertIsNone(report['cards'][0]['extra_minor'])
+
+    def month_end_income(self, **changes):
+        return finance.save_monthly_income(self.user, {'description':'Sentetik ay sonu geliri','amount':'100','frequency':'monthly','schedule_mode':'last_day','start_month':'2026-10','request_key':'weekend-income-plan-01',**changes})['id']
+
+    def test_month_end_weekend_arrival_keeps_weekdays_and_other_recurrences(self):
+        rule={'frequency':'monthly','schedule_mode':'last_day'}
+        for nominal,expected in [('2026-10-31','2026-11-02'),('2024-03-31','2024-04-01'),('2022-12-31','2023-01-02'),('2023-12-31','2024-01-01'),('2024-02-29','2024-02-29'),('2025-02-28','2025-02-28')]:
+            self.assertEqual(core.income_expected_date(rule,nominal),expected)
+        self.assertEqual(core.income_expected_date({'frequency':'monthly','schedule_mode':'anchored'},'2026-10-31'),'2026-10-31')
+        self.assertEqual(core.income_expected_date({'frequency':'weekly','schedule_mode':'anchored'},'2026-10-31'),'2026-10-31')
+        self.assertEqual(core.income_expected_date(None,'2026-10-31'),'2026-10-31')
+
+    def test_shifted_income_crosses_month_without_skipping_or_double_counting(self):
+        rule=self.month_end_income()
+        data=finance.read_data(self.user)
+        self.assertEqual(finance.income_events(data,'2026-10-01','2026-10-31',date(2026,10,31)),[])
+        for first in ('2026-11-01','2026-11-02'):
+            rows=finance.income_events(data,first,'2026-11-02',date(2026,11,2))
+            self.assertEqual(len(rows),1)
+            self.assertEqual((rows[0]['date'],rows[0]['scheduled_on'],rows[0]['rule_id']),('2026-11-02','2026-10-31',rule))
+        rows=finance.income_events(data,'2026-11-01','2026-11-30',date(2026,11,1))
+        self.assertEqual([r['date'] for r in rows],['2026-11-02','2026-11-30'])
+        self.assertEqual(finance.income_events(data,'2026-11-03','2026-11-29',date(2026,11,3)),[])
+        self.assertEqual(data,finance.read_data(self.user))
+
+    def test_automatic_balance_waits_for_monday_and_manual_receipt_is_not_duplicated(self):
+        rule=self.month_end_income(start_month='2024-03',end_on='2024-03-31')
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2024-03-01','auto_income_on_due':1})
+        data=finance.read_data(self.user)
+        self.assertEqual(finance.cash_position(data,date(2024,3,31))['balance_minor'],'50000')
+        self.assertEqual(finance.cash_position(data,date(2024,4,1))['balance_minor'],'60000')
+        self.assertEqual(finance.projected_balance(data,'2024-04-01',date(2024,3,31)),60000)
+        payload={'rule_id':rule,'scheduled_on':'2024-03-31','received_on':'2024-03-31','expected_amount_minor':'10000'}
+        receipt=finance.receive_income(self.user,payload)
+        self.assertEqual(finance.receive_income(self.user,payload),receipt)
+        data=finance.read_data(self.user)
+        self.assertEqual(finance.cash_position(data,date(2024,3,31))['balance_minor'],'60000')
+        self.assertEqual(finance.cash_position(data,date(2024,4,1))['balance_minor'],'60000')
+        self.assertEqual(finance.income_events(data,'2024-04-01','2024-04-30',date(2024,4,1)),[])
+        self.assertEqual(data['income_records'][0]['received_on'],'2024-03-31')
+        self.assertEqual(data['income_records'][0]['expected_on'],'2024-03-31')
+
+    def test_existing_expected_record_moves_only_in_views_and_retains_cycle_key(self):
+        rule=self.month_end_income(start_month='2024-03',end_on='2024-03-31')
+        with core.connect() as db:
+            record=db.execute("INSERT INTO income_records(user_id,rule_id,description,income_type,amount_minor,expected_on,status) VALUES(?,?,?,?,?,?,'expected')",(self.user,rule,'Önceden planlanmış','additional',10000,'2024-03-31')).lastrowid
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2024-03-01','auto_income_on_due':1})
+        before=finance.read_data(self.user)
+        rows=finance.income_events(before,'2024-03-01','2024-04-02',date(2024,4,1))
+        self.assertEqual(len(rows),1)
+        self.assertEqual((rows[0]['record_id'],rows[0]['date']),(record,'2024-04-01'))
+        self.assertEqual(finance.cash_position(before,date(2024,3,31))['balance_minor'],'50000')
+        self.assertEqual(finance.cash_position(before,date(2024,4,1))['balance_minor'],'60000')
+        view=finance.overview(self.user,'2024-04-01','2024-04-30')
+        projected=next(r for r in view['income_records'] if r['id']==record)
+        self.assertEqual((projected['expected_on'],projected['display_expected_on']),('2024-03-31','2024-04-01'))
+        self.assertEqual(before,finance.read_data(self.user))
+        finance.edit_simple_income(self.user,{'record_kind':'income_record','id':record,'revision':projected['revision'],'description':'Düzeltilen','amount':'120','expected_on':'2024-04-01','status':'expected'})
+        actual=next(r for r in finance.read_data(self.user)['income_records'] if r['id']==record)
+        self.assertEqual((actual['rule_id'],actual['expected_on'],actual['amount_minor']),(rule,'2024-03-31',12000))
+
+    def test_legacy_totals_and_calendar_share_monday_and_keep_nominal_storage(self):
+        self.month_end_income(start_month='2024-03',end_on='2024-03-31')
+        before=core.income_overview(self.user,'2024-03',date(2024,3,1))
+        after=core.income_overview(self.user,'2024-04',date(2024,4,1))
+        self.assertEqual(before['expected_minor'],0)
+        self.assertEqual(after['expected_minor'],10000)
+        self.assertEqual([r['expected_on'] for r in after['records']],['2024-04-01'])
+        core.income_overview(self.user,'2024-04',date(2024,4,1))
+        data=finance.read_data(self.user)
+        self.assertEqual(len(data['income_records']),1)
+        self.assertEqual(data['income_records'][0]['expected_on'],'2024-03-31')
+        self.assertIn('2024-04-01',core.export_income_csv(self.user))
+        calendar=core.payment_calendar(self.user,'2024-04-01','2024-04-30',date(2024,4,1))
+        income=[r for r in calendar if r['event_type']=='income']
+        self.assertEqual([(r['date'],r['amount_minor']) for r in income],[('2024-04-01',10000)])
+        self.assertEqual(finance.read_data(self.other)['income_records'],[])
+
+    def test_rolling_arrival_keeps_nominal_month_amount_and_end_date(self):
+        rule=self.month_end_income(start_month='2024-03',end_on='2024-03-31')
+        with core.connect() as db:
+            db.execute('INSERT INTO income_rule_amounts(user_id,rule_id,effective_on,amount_minor) VALUES(?,?,?,?)',(self.user,rule,'2024-04-01',20000))
+        rows=finance.income_events(finance.read_data(self.user),'2024-04-01','2024-04-30',date(2024,4,1))
+        self.assertEqual([(r['date'],r['amount_minor']) for r in rows],[('2024-04-01',10000)])
+
+    def test_weekend_income_is_not_overdue_before_monday_in_recommendations(self):
+        import recommendations
+        rule=self.month_end_income(start_month='2024-03',end_on='2024-03-31')
+        with core.connect() as db:
+            db.execute("INSERT INTO income_records(user_id,rule_id,description,income_type,amount_minor,expected_on,status) VALUES(?,?,?,?,?,?,'expected')",(self.user,rule,'Hafta sonu gelir','additional',10000,'2024-03-31'))
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2024-03-01'})
+        data=finance.read_data(self.user)
+        sunday=recommendations.analyze(data,'2024-04',date(2024,3,31))
+        self.assertNotIn('overdue_income',{r['code'] for r in sunday['issues']})
+        tuesday=recommendations.analyze(data,'2024-04',date(2024,4,2))
+        issue=next(r for r in tuesday['issues'] if r['code']=='overdue_income')
+        self.assertEqual((issue['count'],issue['amount_minor']),(1,'10000'))
+        self.assertEqual(data,finance.read_data(self.user))
