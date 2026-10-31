@@ -972,6 +972,7 @@ class SimpleCashflowTest(unittest.TestCase):
         young=self.card(display_name='Dönem A',payment_due_day=6,statement_closing_day=26)
         trink=self.card(display_name='Dönem B',payment_due_day=26,statement_closing_day=16)
         other=self.card(display_name='Dönem C',payment_due_day=9,statement_closing_day=28)
+        self.plan(entry_kind='installment',card_ref=young,amount='12858.68',start_on='2026-11-06',end_on='2026-11-06',request_key='balance-card-installment')
         for ref,month,amount in ((young,'2026-11','26279.78'),(trink,'2026-10','5379.01'),(other,'2026-11','8026.22')):
             finance.save_card_monthly_total(self.user,{'card_ref':ref,'month':month,'amount':amount,'version':0})
         for description,amount,key in (('Sentetik maaş','56500','balance-salary-rule'),('Sentetik yol','2100','balance-travel-rule')):
