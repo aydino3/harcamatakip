@@ -1036,4 +1036,58 @@ class SimpleCashflowTest(unittest.TestCase):
     def test_period_balance_does_not_present_today_cash_as_a_historical_month_end(self):
         finance.save_opening(self.user,{'amount':'500','effective_on':'2026-10-01'})
         projected=finance.period_projected_balance(finance.read_data(self.user),'2026-10',date(2026,11,2))
-        self.assertIsNone(projected['projected_balance_minor']);self.assertFalse(projected['complete'])
+        self.assertIsNone(projected['projected_balance_minor']);self.assertEqual(projected['unavailable_reason'],'historical')
+
+    def test_previous_period_keeps_unreceived_income_after_midnight_with_corrected_current_bank(self):
+        self.period_balance_fixture()
+        data=finance.read_data(self.user);row=next(r for r in data['income_records'] if r['description']=='Sentetik ek gelir')
+        finance.edit_simple_income(self.user,{'record_kind':'income_record','amount':'700','id':row['id'],'revision':finance.managed_revision(data,'income_record',row['id']),'expected_on':'2026-11-02','report_month':'2026-10','status':'expected'})
+        with core.connect() as db:
+            db.execute('INSERT INTO cash_adjustments(user_id,adjustment_on,amount_minor,description) VALUES(?,?,?,?)',(self.user,'2026-11-01',-1725,'Sentetik banka mutabakatı; gelir veya gider değildir'))
+        before=finance.read_data(self.user)
+        pending=finance.period_projected_balance(before,'2026-10',date(2026,11,1))
+        self.assertEqual((pending['bank_balance_minor'],pending['pending_income_minor'],pending['pending_payments_minor'],pending['projected_balance_minor']),('-1477626','5930000','3430600','1021774'))
+        self.assertTrue(pending['period_ended']);self.assertTrue(pending['complete'])
+        self.assertEqual(finance.period_projected_balance(before,'2026-10',date(2026,11,2))['projected_balance_minor'],'1021774')
+        october=finance.monthly_period_summary(before,'2026-10',date(2026,11,1))
+        november=finance.monthly_period_summary(before,'2026-11',date(2026,11,1))
+        self.assertEqual(october['income_expected_minor'],'5930000');self.assertEqual(november['income_expected_minor'],'0')
+        self.assertEqual(before,finance.read_data(self.user))
+
+    def test_income_reporting_month_is_separate_from_arrival_and_receipt_does_not_duplicate_it(self):
+        result=finance.save_income_once(self.user,{'description':'Ekim ek geliri','amount':'700','expected_on':'2026-11-02','report_month':'2026-10','status':'expected','request_key':'report-month-income-01'})
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2026-10-01','auto_income_on_due':1})
+        data=finance.read_data(self.user)
+        self.assertEqual(finance.cash_position(data,date(2026,11,1))['balance_minor'],'50000')
+        self.assertEqual(finance.cash_position(data,date(2026,11,2))['balance_minor'],'120000')
+        self.assertEqual(finance.income_events(data,'2026-10-01','2026-10-31',date(2026,11,1)),[])
+        self.assertEqual(finance.income_events(data,'2026-10-01','2026-10-31',date(2026,11,1),by_period=True)[0]['date'],'2026-11-02')
+        from unittest.mock import patch
+        with patch('simple_cashflow.today',return_value=date(2026,11,2)):
+            finance.receive_income(self.user,{'record_id':result['id'],'received_on':'2026-11-02'})
+        after=finance.read_data(self.user)
+        self.assertEqual(finance.cash_position(after,date(2026,11,2))['balance_minor'],'120000')
+        self.assertEqual(len(finance.income_events(after,'2026-10-01','2026-10-31',date(2026,11,2),by_period=True)),1)
+        self.assertEqual(finance.monthly_period_summary(after,'2026-11',date(2026,11,2))['income_received_minor'],'0')
+
+    def test_income_report_month_validation_idempotency_and_ownership(self):
+        payload={'description':'Dönem seçimi','amount':'700','expected_on':'2026-11-02','report_month':'2026-10','status':'expected','request_key':'report-month-validation'}
+        result=finance.save_income_once(self.user,payload)
+        self.assertEqual(finance.save_income_once(self.user,payload),result)
+        with self.assertRaises(finance.Conflict):finance.save_income_once(self.user,{**payload,'report_month':'2026-09'})
+        for month in ('2026-00','2026-13','2026-1','2026-10-01',True,123):
+            with self.assertRaises(ValueError):finance.save_income_once(self.user,{**payload,'report_month':month,'request_key':'invalid-report-month'})
+        data=finance.read_data(self.user);revision=finance.managed_revision(data,'income_record',result['id'])
+        with self.assertRaises(ValueError):finance.edit_simple_income(self.other,{'record_kind':'income_record','amount':'700','id':result['id'],'revision':revision,'report_month':'2026-09'})
+        finance.edit_simple_income(self.user,{'record_kind':'income_record','amount':'700','id':result['id'],'revision':revision,'report_month':'2026-09'})
+        with self.assertRaises(finance.Conflict):finance.edit_simple_income(self.user,{'record_kind':'income_record','amount':'700','id':result['id'],'revision':revision,'report_month':'2026-08'})
+        self.assertEqual(finance.read_data(self.user)['income_records'][0]['report_month'],'2026-09')
+
+    def test_report_month_schema_upgrade_is_additive_and_repeatable(self):
+        result=finance.save_income_once(self.user,{'description':'Eski gelir','amount':'10','expected_on':'2024-01-01','status':'expected','request_key':'legacy-report-month'})
+        with core.connect() as db:
+            db.execute('ALTER TABLE income_records DROP COLUMN report_month')
+            original=dict(db.execute('SELECT * FROM income_records WHERE user_id=? AND id=?',(self.user,result['id'])).fetchone())
+        finance.initialize();finance.initialize()
+        row=finance.read_data(self.user)['income_records'][0]
+        self.assertIsNone(row.pop('report_month'));self.assertEqual(row,original)

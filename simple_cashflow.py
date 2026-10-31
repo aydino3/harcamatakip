@@ -86,7 +86,7 @@ def income_events(data,start_value,end_value,as_of,*,by_period=False):
     start,end=date.fromisoformat(start_value),date.fromisoformat(end_value)
     events=[]
     def add(key,when,amount,description,kind,status,**extra):
-        period_on=extra.get("scheduled_on") or extra.get("expected_on") or when
+        period_on=extra.pop('report_on',None) or extra.get("scheduled_on") or extra.get("expected_on") or when
         selected=period_on if by_period else when
         if start_value<=selected<=end_value:
             events.append({"id":key,"date":when,"amount_minor":int(amount),"description":description,"kind":kind,"status":status,**extra,**({"period_on":period_on} if by_period else {})})
@@ -94,16 +94,17 @@ def income_events(data,start_value,end_value,as_of,*,by_period=False):
     actual_income_keys=set(tuple(key) for key in data.get('suppressed_income_keys',[]))
     rules={row["id"]:row for row in data["income_rules"]}
     for row in data["income_records"]:
+        report_on=row['report_month']+'-01' if row.get('report_month') else None
         if row["rule_id"] is not None:
             actual_income_keys.add((row["rule_id"],row["expected_on"]))
         if row["status"]=="received":
             if row["rule_id"] is not None:
                 actual_income_keys.add((row["rule_id"],row["expected_on"]))
-            add(f"income:{row['id']}",row["received_on"],row["amount_minor"],row["description"],"income","received",record_id=row["id"],expected_on=row["expected_on"])
+            add(f"income:{row['id']}",row["received_on"],row["amount_minor"],row["description"],"income","received",record_id=row["id"],expected_on=row["expected_on"],report_on=report_on)
         elif row["status"]=="expected":
             if row["rule_id"] is not None and rules.get(row["rule_id"],{}).get("status")!="active":continue
             expected = income_record_expected_date(data, row)
-            add(f"income:{row['id']}",expected,row["amount_minor"],row["description"],"income","received" if automatic and expected<=as_of.isoformat() else "overdue" if expected<as_of.isoformat() else "expected",record_id=row["id"],scheduled_on=row["expected_on"],auto_received=automatic and expected<=as_of.isoformat())
+            add(f"income:{row['id']}",expected,row["amount_minor"],row["description"],"income","received" if automatic and expected<=as_of.isoformat() else "overdue" if expected<as_of.isoformat() else "expected",record_id=row["id"],scheduled_on=row["expected_on"],auto_received=automatic and expected<=as_of.isoformat(),report_on=report_on)
     for rule in rules.values():
         if rule["status"]!="active":
             continue
@@ -236,6 +237,10 @@ def initialize():
     profile_settings.initialize()
     with core.connect() as db:
         pg=hasattr(db,"_conn")
+        if pg:
+            db.execute('ALTER TABLE income_records ADD COLUMN IF NOT EXISTS report_month TEXT')
+        elif 'report_month' not in {row[1] for row in db.execute('PRAGMA table_info(income_records)')}:
+            db.execute('ALTER TABLE income_records ADD COLUMN report_month TEXT')
         if pg:
             db.execute('ALTER TABLE cash_settings ADD COLUMN IF NOT EXISTS auto_income_on_due INTEGER NOT NULL DEFAULT 0 CHECK(auto_income_on_due IN (0,1))')
         elif 'auto_income_on_due' not in {row[1] for row in db.execute('PRAGMA table_info(cash_settings)')}:
@@ -455,6 +460,14 @@ def _detail_fields(row,fallback='installment'):
     return {'entry_kind':row['entry_kind'] if row else fallback,'card_ref':('legacy:'+str(row['legacy_card_id'])) if row and row['legacy_card_id'] else ('card:'+str(row['profile_card_id'])) if row and row['profile_card_id'] else '', 'purchased_on':row['purchased_on'] if row else None}
 
 
+def income_report_month(value):
+    import re
+    if value is None or value=='':return None
+    if not isinstance(value,str) or not re.fullmatch(r'\d{4}-\d{2}',value):raise ValueError('Gelirin ait olduğu ayı kontrol edin.')
+    date.fromisoformat(value+'-01')
+    return value
+
+
 def save_income_once(user_id,payload):
     key=_key(payload)
     description,income_type,expected,note,amount,category=core._valid_income_fields(payload)
@@ -462,17 +475,18 @@ def save_income_once(user_id,payload):
     if status not in ("expected","received") or status=="received" and expected>today():
         raise ValueError("Alınmış gelir gelecekte olamaz; tarihi ve durumu kontrol edin.")
     received=expected.isoformat() if status=="received" else None
+    report_month=income_report_month(payload.get('report_month'))
     with core.LOCK,core.connect() as db:
         _write_lock(db,"income_records",user_id)
         if category and not db.execute("SELECT 1 FROM categories WHERE id=? AND user_id=?",(category,user_id)).fetchone():
             raise ValueError("Kategori hesabınıza ait olmalı.")
         previous=db.execute("SELECT * FROM income_records WHERE user_id=? AND client_request_key=?",(user_id,key)).fetchone()
-        fields=(description,income_type,amount,expected.isoformat(),status,received)
+        fields=(description,income_type,amount,expected.isoformat(),status,received,report_month)
         if previous:
-            if tuple(previous[name] for name in ("description","income_type","amount_minor","expected_on","status","received_on"))!=fields:
+            if tuple(previous[name] for name in ("description","income_type","amount_minor","expected_on","status","received_on","report_month"))!=fields:
                 raise Conflict("Aynı kayıt isteği farklı bilgilerle kullanılamaz.")
             return {"id":previous["id"]}
-        row=db.execute("INSERT INTO income_records(user_id,description,income_type,amount_minor,expected_on,status,received_on,category_id,note,client_request_key) VALUES(?,?,?,?,?,?,?,?,?,?)",(user_id,*fields,category,note,key))
+        row=db.execute("INSERT INTO income_records(user_id,description,income_type,amount_minor,expected_on,status,received_on,report_month,category_id,note,client_request_key) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(user_id,*fields,category,note,key))
         return {"id":row.lastrowid}
 
 
@@ -824,13 +838,12 @@ def period_projected_balance(data,month,as_of=None,cards=None):
     end=date.fromisoformat(month+'-01');end=end.replace(day=monthrange(end.year,end.month)[1])
     position=cash_position(data,as_of)
     result={'basis':'pending_reporting_periods','configured':position['configured'],'as_of':as_of.isoformat(),'through_month':month,'bank_balance_minor':position['balance_minor'],'pending_income_minor':None,'pending_payments_minor':None,'projected_balance_minor':None,'complete':False}
-    if end<as_of:
-        result['unavailable_reason']='historical'
-        return result
+    result['period_ended']=end<as_of
     if position['balance_minor'] is None:return result
-    starts=[as_of.isoformat()]
+    starts=[min(as_of.isoformat(),month+'-01')]
     for key,field in (('income_rules','start_on'),('income_records','expected_on'),('recurring','start_on'),('statements','closing_on'),('card_monthly_totals','month')):
         starts.extend(row[field]+'-01' if field=='month' else row[field] for row in data.get(key,[]) if row.get(field))
+    starts.extend(row['report_month']+'-01' for row in data['income_records'] if row.get('report_month'))
     first=min(starts)[:7]+'-01'
     if (end-date.fromisoformat(first)).days>3660:return result
     incomes=income_events(data,first,end.isoformat(),as_of,by_period=True)
@@ -843,7 +856,7 @@ def period_projected_balance(data,month,as_of=None,cards=None):
         report=cards if candidate==month and cards is not None else card_statement_spending(data,candidate)
         # Unknown historical months with no recorded obligations are not debts.
         # Current/future report months require complete statement information.
-        if candidate>=as_of.isoformat()[:7] and not report['complete']:complete=False
+        if (candidate==month or candidate>=as_of.isoformat()[:7]) and not report['complete']:complete=False
         if report['unassigned_installments']:complete=False
         for row in report['cards']:
             if row['total_minor'] is None:
@@ -853,6 +866,9 @@ def period_projected_balance(data,month,as_of=None,cards=None):
             pending_payments+=max(0,int(row['total_minor'])-int(row.get('paid_minor') or 0))
         candidate=card_schedule.shift_month(candidate,1)
     result.update(pending_income_minor=str(pending_income),pending_payments_minor=str(pending_payments),complete=complete)
+    if end<as_of and not pending_income and not pending_payments:
+        result['unavailable_reason']='historical'
+        return result
     if complete:result['projected_balance_minor']=str(int(position['balance_minor'])+pending_income-pending_payments)
     return result
 
@@ -1091,8 +1107,11 @@ def edit_simple_income(user_id,payload):
         if payload.get('revision')!=managed_revision(data,kind,record_id):raise Conflict('Gelir başka bir ekranda değişti. Listeyi yenileyin.')
         if category and not db.execute('SELECT 1 FROM categories WHERE user_id=? AND id=?',(user_id,category)).fetchone():raise ValueError('Kategori hesabınıza ait olmalı.')
         if kind=='income_record':
+            report_month=income_report_month(payload.get('report_month',row.get('report_month')))
             if row['rule_id'] is not None and expected.isoformat()==income_record_expected_date(data,row):
                 expected=date.fromisoformat(row['expected_on'])
+            if row['rule_id'] is not None and expected.isoformat()==row['expected_on'] and report_month:
+                raise ValueError('Düzenli gelirin dönemi kendi planından hesaplanır.')
             if row['rule_id'] is not None and expected.isoformat()!=row['expected_on']:
                 db.execute('UPDATE income_records SET rule_id=NULL WHERE user_id=? AND id=?',(user_id,record_id))
                 db.execute("INSERT INTO income_records(user_id,description,income_type,amount_minor,expected_on,status,rule_id) VALUES(?,?,?,?,?,'cancelled',?)",(user_id,row['description'],row['income_type'],row['amount_minor'],row['expected_on'],row['rule_id']))
@@ -1100,7 +1119,7 @@ def edit_simple_income(user_id,payload):
             if status not in ('expected','received'):raise ValueError('Gelirin durumunu kontrol edin.')
             received=date.fromisoformat(payload.get('received_on') or expected.isoformat()) if status=='received' else None
             if received and (received>today() or received.isoformat()!=(payload.get('received_on') or expected.isoformat())):raise ValueError('Gerçek alınma tarihi gelecekte olamaz.')
-            db.execute('UPDATE income_records SET description=?,income_type=?,amount_minor=?,expected_on=?,received_on=?,status=?,note=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(description,income_type,amount,expected.isoformat(),received.isoformat() if received else None,status,note,record_id,user_id))
+            db.execute('UPDATE income_records SET description=?,income_type=?,amount_minor=?,expected_on=?,received_on=?,status=?,note=?,report_month=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(description,income_type,amount,expected.isoformat(),received.isoformat() if received else None,status,note,report_month,record_id,user_id))
         else:
             frequency=payload.get('frequency');mode=payload.get('schedule_mode','anchored')
             if frequency not in ('monthly','weekly') or mode not in ('anchored','last_day') or frequency=='weekly' and mode!='anchored':raise ValueError('Gelirin tekrar sıklığını kontrol edin.')

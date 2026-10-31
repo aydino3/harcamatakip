@@ -654,6 +654,9 @@ function apply(){document.documentElement.lang=language;document.title=t('Harcam
 function setLanguage(next){if(next!=='tr'&&next!=='en')return;const changed=language!==next;language=next;try{localStorage.setItem('finance.language',next)}catch{}apply();if(changed)document.dispatchEvent(new Event('finance-language-change'))}
 Object.assign(messages,{"Bu ayın son bakiyesi için eksik ekstre veya dönem bilgilerini tamamla.":"Complete the missing statement or period details to calculate this month's closing balance.","Mevcut banka/nakit bakiyesi + bu aya kadar ait olan alınmamış gelirler − ödenmemiş borçlar. Daha önce alınan ve ödenen tutarlar ikinci kez sayılmaz.":"Current bank/cash balance + unreceived income attributed through this month − unpaid debts. Amounts already received or paid are not counted again."});
 Object.assign(messages,{"Bugünkü banka bakiyesi geçmiş ayın kapanışı olarak gösterilmez.":"Today’s bank balance is not presented as the closing balance of a past month."});
+Object.assign(messages,{"Dönem tamamlandığında öngörülen bakiye":"Projected balance when the period is settled"});
+Object.assign(messages,{"Gelirin ait olduğu ay":"Income reporting month","Gelir bu ayın raporunda görünür; banka bakiyesine yatış tarihinde eklenir.":"Income appears in this month's report and enters your bank balance on its arrival date.","· Ait olduğu ay:":"· Reporting month:"});
+Object.assign(messages,{"Tamamlandı":"Settled","Bu dönemin bekleyen geliri veya ödenmemiş borcu kalmadı. Güncel paranı Banka / Nakit Bakiyesi bölümünde görebilirsin.":"This period has no remaining expected income or unpaid debt. See Bank / Cash Balance for your current money."});
 window.FinanceI18n=Object.freeze({t,error,retranslate,setLanguage,get language(){return language},get locale(){return language==='en'?'en-GB':'tr-TR'}});
 apply();document.addEventListener('DOMContentLoaded',apply);
 })();

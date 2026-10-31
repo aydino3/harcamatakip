@@ -148,3 +148,13 @@ test('Eksik dönem borcunda nakit tahmini sessizce ay sonu bakiyesi yerine kulla
  const html=vm.runInContext('summaryCards(sample,true)',ctx);assert.match(html,/Ay sonu öngörülen bakiye<\/span><strong>Eksik bilgi/);assert.doesNotMatch(html,/9\.999,99 ₺/);assert.match(html,/eksik ekstre veya dönem/);
  sample.period_summary.projection.unavailable_reason='historical';ctx.sample=sample;assert.match(vm.runInContext('summaryCards(sample,true)',ctx),/geçmiş ayın kapanışı/);
 });
+
+test('Ay değişince bekleyen önceki dönem bakiyesi kaybolmaz; dönem tahmini olarak adlandırılır',()=>{
+ const ctx=context(async()=>response({}));const sample=view('0');sample.period_summary={income_received_minor:'0',income_expected_minor:'5930000',payments_paid_minor:'4537901',payments_planned_minor:'3430600',adjustments_minor:'0',payments_complete:true,net_minor:'-2038501',projection:{configured:true,complete:true,period_ended:true,bank_balance_minor:'-1477626',pending_income_minor:'5930000',pending_payments_minor:'3430600',projected_balance_minor:'1021774'}};ctx.sample=sample;
+ const html=vm.runInContext('summaryCards(sample,true)',ctx);assert.match(html,/Dönem tamamlandığında öngörülen bakiye/);assert.match(html,/10\.217,74 ₺/);assert.doesNotMatch(html,/Eksik bilgi|geçmiş ayın kapanışı/);
+});
+
+test('Tamamlanan eski dönem bugünkü banka parasıyla sahte kapanış göstermeden tamamlandı olur',()=>{
+ const ctx=context(async()=>response({}));const sample=view('0');sample.period_summary={income_received_minor:'0',income_expected_minor:'0',payments_paid_minor:'0',payments_planned_minor:'0',adjustments_minor:'0',payments_complete:true,net_minor:'0',projection:{configured:true,complete:true,period_ended:true,unavailable_reason:'historical',projected_balance_minor:null}};ctx.sample=sample;
+ const html=vm.runInContext('summaryCards(sample,true)',ctx);assert.match(html,/<strong>Tamamlandı<\/strong>/);assert.doesNotMatch(html,/Eksik bilgi/);
+});
