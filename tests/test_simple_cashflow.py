@@ -967,3 +967,72 @@ class SimpleCashflowTest(unittest.TestCase):
         summary=finance.monthly_period_summary(finance.read_data(self.user),'2024-10')
         self.assertFalse(summary['payments_complete'])
         self.assertEqual((summary['payments_paid_minor'],summary['payments_planned_minor']),('0','10000'))
+
+    def period_balance_fixture(self):
+        young=self.card(display_name='Dönem A',payment_due_day=6,statement_closing_day=26)
+        trink=self.card(display_name='Dönem B',payment_due_day=26,statement_closing_day=16)
+        other=self.card(display_name='Dönem C',payment_due_day=9,statement_closing_day=28)
+        for ref,month,amount in ((young,'2026-11','26279.78'),(trink,'2026-10','5379.01'),(other,'2026-11','8026.22')):
+            finance.save_card_monthly_total(self.user,{'card_ref':ref,'month':month,'amount':amount,'version':0})
+        for description,amount,key in (('Sentetik maaş','56500','balance-salary-rule'),('Sentetik yol','2100','balance-travel-rule')):
+            finance.save_monthly_income(self.user,{'description':description,'amount':amount,'frequency':'monthly','schedule_mode':'last_day','start_month':'2026-10','end_on':'2026-10-31','request_key':key})
+        finance.save_income_once(self.user,{'description':'Sentetik ek gelir','amount':'700','expected_on':'2026-10-31','status':'expected','request_key':'balance-once-income'})
+        bank=self.plan(entry_kind='regular',card_ref=None,amount='40000',start_on='2026-10-31',end_on='2026-10-31',request_key='balance-bank-plan')
+        finance.record_payment(self.user,bank,{'scheduled_on':'2026-10-31','paid_on':'2026-10-31','amount':'40000','request_key':'balance-bank-paid'})
+        finance.record_card_monthly_payment(self.user,{'card_ref':trink,'month':'2026-10','amount':'5379.01','paid_on':'2026-10-26','request_key':'balance-card-paid'})
+        finance.save_opening(self.user,{'amount':'30620','effective_on':'2026-10-26','auto_income_on_due':1})
+        return young,trink,other
+
+    def test_period_balance_uses_bank_plus_unreceived_period_income_minus_unpaid_period_debts(self):
+        from unittest.mock import patch
+        self.period_balance_fixture();data=finance.read_data(self.user)
+        projected=finance.period_projected_balance(data,'2026-10',date(2026,10,31))
+        self.assertEqual((projected['bank_balance_minor'],projected['pending_income_minor'],projected['pending_payments_minor']),('-1405901','5860000','3430600'))
+        self.assertEqual(projected['projected_balance_minor'],'1023499')
+        self.assertTrue(projected['complete'])
+        self.assertEqual(finance.projected_balance(data,'2026-10-31',date(2026,10,31)),-1405901)
+        with patch('simple_cashflow.today',return_value=date(2026,10,31)):
+            self.assertEqual(finance.overview(self.user,'2026-10-01','2026-10-31')['period_summary']['projection'],projected)
+        self.assertEqual(data,finance.read_data(self.user))
+
+    def test_period_balance_receipt_and_partial_card_payment_are_not_counted_twice(self):
+        young,_,_=self.period_balance_fixture();data=finance.read_data(self.user)
+        salary=next(r for r in data['income_rules'] if r['description']=='Sentetik maaş')
+        finance.receive_income(self.user,{'rule_id':salary['id'],'scheduled_on':'2026-10-31','received_on':'2026-10-31','expected_amount_minor':'5650000'})
+        finance.record_card_monthly_payment(self.user,{'card_ref':young,'month':'2026-11','amount':'100','paid_on':'2026-10-31','request_key':'balance-partial-paid'})
+        projected=finance.period_projected_balance(finance.read_data(self.user),'2026-10',date(2026,10,31))
+        self.assertEqual(projected['projected_balance_minor'],'1023499')
+        self.assertEqual(projected['pending_income_minor'],'210000')
+        self.assertEqual(projected['pending_payments_minor'],'3420600')
+
+    def test_period_balance_carries_unpaid_previous_statement_month_without_readding_received_salary(self):
+        refs=self.period_balance_fixture()
+        for ref,payment_month in zip(refs,('2026-12','2026-11','2026-12')):
+            finance.save_card_monthly_total(self.user,{'card_ref':ref,'month':payment_month,'amount':'0','version':0})
+        data=finance.read_data(self.user)
+        before=finance.period_projected_balance(data,'2026-11',date(2026,10,31))
+        after=finance.period_projected_balance(data,'2026-11',date(2026,11,2))
+        self.assertEqual((before['projected_balance_minor'],after['projected_balance_minor']),('1023499','1023499'))
+        self.assertEqual(after['pending_income_minor'],'0')
+        self.assertEqual(after['pending_payments_minor'],'3430600')
+        self.assertEqual(data,finance.read_data(self.user))
+
+    def test_period_balance_requires_statement_details_and_opening_without_inventing_a_total(self):
+        self.card(payment_due_day=6,statement_closing_day=26)
+        missing_opening=finance.period_projected_balance(finance.read_data(self.user),'2026-10',date(2026,10,31))
+        self.assertFalse(missing_opening['configured']);self.assertIsNone(missing_opening['projected_balance_minor'])
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2026-10-01'})
+        missing_total=finance.period_projected_balance(finance.read_data(self.user),'2026-10',date(2026,10,31))
+        self.assertTrue(missing_total['configured']);self.assertFalse(missing_total['complete'])
+        self.assertIsNone(missing_total['projected_balance_minor'])
+
+    def test_period_balance_opening_snapshot_does_not_readd_preopening_received_income(self):
+        finance.save_income_once(self.user,{'description':'Başlangıca dahil gelir','amount':'100','expected_on':'2026-10-01','received_on':'2026-10-01','status':'received','request_key':'balance-old-receipt'})
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2026-10-26'})
+        projected=finance.period_projected_balance(finance.read_data(self.user),'2026-10',date(2026,10,31))
+        self.assertEqual(projected['pending_income_minor'],'0');self.assertEqual(projected['projected_balance_minor'],'50000')
+
+    def test_period_balance_does_not_present_today_cash_as_a_historical_month_end(self):
+        finance.save_opening(self.user,{'amount':'500','effective_on':'2026-10-01'})
+        projected=finance.period_projected_balance(finance.read_data(self.user),'2026-10',date(2026,11,2))
+        self.assertIsNone(projected['projected_balance_minor']);self.assertFalse(projected['complete'])

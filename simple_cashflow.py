@@ -219,6 +219,7 @@ def overview(user_id,start_value,end_value):
     result['card_monthly_debt']=monthly_card_debt(data,start_value[:7])
     result['card_statement_spending']=card_statement_spending(data,start_value[:7])
     result['period_summary']=monthly_period_summary(data,start_value[:7],cards=result['card_statement_spending'])
+    result['period_summary']['projection']=period_projected_balance(data,start_value[:7],cards=result['card_statement_spending'])
     covered={(row['card_ref'],row['month']) for row in data.get('card_monthly_totals',[])}
     result['statements']=[{**row,'covered_by_monthly_total':('legacy:'+str(row['card_id']),row['payment_month']) in covered,**{k:str(row[k]) for k in ('total_minor','paid_minor','remaining_minor')}} for row in statement_balances(data)]
     result["net_minor"]=str(result["net_minor"])
@@ -809,6 +810,51 @@ def monthly_period_summary(data,month,as_of=None,cards=None):
     paid=int(bank['totals']['payments_paid_minor'])+card_paid
     planned=int(bank['totals']['payments_planned_minor'])+card_total-card_paid
     return {'month':month,'basis':'income_period_and_statement_closing_month','income_received_minor':str(received),'income_expected_minor':str(expected),'payments_paid_minor':str(paid),'payments_planned_minor':str(planned),'adjustments_minor':'0','payments_complete':cards['complete'],'net_minor':str(received+expected-paid-planned)}
+
+
+def period_projected_balance(data,month,as_of=None,cards=None):
+    """Recorded cash plus unsettled obligations attributed through the report month.
+
+    Reporting allocation does not recognize money or change actual cash dates.
+    Already received/paid amounts are in cash_position, so only their remainder
+    belongs in this projection. Earlier pending periods carry forward once.
+    """
+    from calendar import monthrange
+    as_of=as_of or today()
+    end=date.fromisoformat(month+'-01');end=end.replace(day=monthrange(end.year,end.month)[1])
+    position=cash_position(data,as_of)
+    result={'basis':'pending_reporting_periods','configured':position['configured'],'as_of':as_of.isoformat(),'through_month':month,'bank_balance_minor':position['balance_minor'],'pending_income_minor':None,'pending_payments_minor':None,'projected_balance_minor':None,'complete':False}
+    if end<as_of:
+        result['unavailable_reason']='historical'
+        return result
+    if position['balance_minor'] is None:return result
+    starts=[as_of.isoformat()]
+    for key,field in (('income_rules','start_on'),('income_records','expected_on'),('recurring','start_on'),('statements','closing_on'),('card_monthly_totals','month')):
+        starts.extend(row[field]+'-01' if field=='month' else row[field] for row in data.get(key,[]) if row.get(field))
+    first=min(starts)[:7]+'-01'
+    if (end-date.fromisoformat(first)).days>3660:return result
+    incomes=income_events(data,first,end.isoformat(),as_of,by_period=True)
+    pending_income=sum(row['amount_minor'] for row in incomes if row['status']!='received')
+    bank=calculate(data,first,end.isoformat(),as_of,bank_payment_period=True)
+    pending_payments=int(bank['totals']['payments_planned_minor'])
+    complete=True
+    candidate=first[:7]
+    while candidate<=month:
+        report=cards if candidate==month and cards is not None else card_statement_spending(data,candidate)
+        # Unknown historical months with no recorded obligations are not debts.
+        # Current/future report months require complete statement information.
+        if candidate>=as_of.isoformat()[:7] and not report['complete']:complete=False
+        if report['unassigned_installments']:complete=False
+        for row in report['cards']:
+            if row['total_minor'] is None:
+                if int(row['installment_minor'])+int(row['regular_minor']):complete=False
+                continue
+            if row['inconsistent']:complete=False
+            pending_payments+=max(0,int(row['total_minor'])-int(row.get('paid_minor') or 0))
+        candidate=card_schedule.shift_month(candidate,1)
+    result.update(pending_income_minor=str(pending_income),pending_payments_minor=str(pending_payments),complete=complete)
+    if complete:result['projected_balance_minor']=str(int(position['balance_minor'])+pending_income-pending_payments)
+    return result
 
 
 def save_card_monthly_total(user_id,payload):

@@ -652,6 +652,8 @@ function retranslate(value){const text=String(value??''),key=Object.keys(message
 function error(value){const text=String(value||'İşlem tamamlanamadı. Lütfen tekrar deneyin.');const result=t(text);return language==='en'&&/[ğüşöçıİĞÜŞÖÇ]/.test(result)?'Unable to complete this action. Please check your details and try again.':result}
 function apply(){document.documentElement.lang=language;document.title=t('Harcama Takibi');const loading=document.querySelector('#app .loading');if(loading)loading.textContent=t('Yükleniyor…')}
 function setLanguage(next){if(next!=='tr'&&next!=='en')return;const changed=language!==next;language=next;try{localStorage.setItem('finance.language',next)}catch{}apply();if(changed)document.dispatchEvent(new Event('finance-language-change'))}
+Object.assign(messages,{"Bu ayın son bakiyesi için eksik ekstre veya dönem bilgilerini tamamla.":"Complete the missing statement or period details to calculate this month's closing balance.","Mevcut banka/nakit bakiyesi + bu aya kadar ait olan alınmamış gelirler − ödenmemiş borçlar. Daha önce alınan ve ödenen tutarlar ikinci kez sayılmaz.":"Current bank/cash balance + unreceived income attributed through this month − unpaid debts. Amounts already received or paid are not counted again."});
+Object.assign(messages,{"Bugünkü banka bakiyesi geçmiş ayın kapanışı olarak gösterilmez.":"Today’s bank balance is not presented as the closing balance of a past month."});
 window.FinanceI18n=Object.freeze({t,error,retranslate,setLanguage,get language(){return language},get locale(){return language==='en'?'en-GB':'tr-TR'}});
 apply();document.addEventListener('DOMContentLoaded',apply);
 })();
