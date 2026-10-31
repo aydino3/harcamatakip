@@ -500,7 +500,7 @@ class AppTest(unittest.TestCase):
         with app.connect() as db: statement_id=db.execute("SELECT statement_id FROM expenses WHERE id=?",(purchase,)).fetchone()[0]
         self.assertEqual(next(row for row in statements if row["id"]==statement_id)["total_minor"],1334)
         self.assertEqual(app.summary(self.user_a,today.strftime("%Y-%m"))["spent_minor"],2000)
-        self.assertTrue(app.edit_statement_dates(self.user_a,statement_id,(today-timedelta(days=1)).isoformat(),(today+timedelta(days=20)).isoformat()))
+        self.assertTrue(app.edit_statement_dates(self.user_a,statement_id,max(today-timedelta(days=1),today.replace(day=1)).isoformat(),(today+timedelta(days=20)).isoformat()))
         corrected=next(row for row in app.list_card_statements(self.user_a,card) if row["id"]==statement_id)
         self.assertEqual(corrected["total_minor"],1334)
         card_data={"id":card,"bank_name":"Synthetic Bank","display_name":"Everyday","closing_day":31,"due_day":20,"active":0}
@@ -634,6 +634,8 @@ class AppTest(unittest.TestCase):
         self.assertTrue(app.set_income_rule_status(self.user_a,rule_id,"paused"))
         self.assertEqual(app.income_totals(self.user_a,next_month)["expected_minor"],0)
         self.assertTrue(app.set_income_rule_status(self.user_a,rule_id,"active"))
+        # Early in a month, the current 46-day window does not reach next month-end.
+        app.income_overview(self.user_a,next_month)
         self.assertEqual(app.income_totals(self.user_a,next_month)["expected_minor"],350000)
         self.assertTrue(app.set_income_rule_status(self.user_a,rule_id,"cancelled"))
         self.assertEqual(app.income_totals(self.user_a,next_month)["expected_minor"],0)
