@@ -110,3 +110,25 @@ test('Hafta sonu ay sonu geliri pazartesiye geçer; Alındı aynı dönemi ikinc
   await page.locator('nav [data-section=income]').click();await page.getByText(/Ay sonu; hafta sonuysa pazartesi/).waitFor();
  }finally{await context.close()}
 });
+
+test('Aylık gelir ve ödemeler ait oldukları ayda; banka dahil nakit tahmini ayrı kalır',async()=>{
+ const context=await browser.newContext({viewport:{width:390,height:900}}),page=await context.newPage();
+ try{
+  const todayParts=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Istanbul',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()),part=t=>todayParts.find(p=>p.type===t).value,today=`${part('year')}-${part('month')}-${part('day')}`;
+  let last;for(let offset=0;offset<24;offset++){const candidate=new Date(Date.UTC(Number(part('year')),Number(part('month'))+offset,0));if(candidate.toISOString().slice(0,10)>=today&&[0,6].includes(candidate.getUTCDay())){last=candidate;break}}assert.ok(last);
+  const nominal=last.toISOString().slice(0,10),month=nominal.slice(0,7),first=month+'-01',next=new Date(Date.UTC(last.getUTCFullYear(),last.getUTCMonth()+1,1)).toISOString().slice(0,7);
+  const auth=await(await context.request.post(url+'/api/register',{data:{email:'period-summary-e2e@example.invalid',username:'period-summary-e2e',password:'synthetic-period-summary'}})).json(),headers={'X-CSRF-Token':auth.csrf};
+  assert.equal((await context.request.post(url+'/api/simple-income',{headers,data:{description:'Döneme ait maaş',amount:'1000',frequency:'monthly',schedule_mode:'last_day',start_month:month,end_on:nominal,request_key:'period-summary-income-01'}})).status(),200);
+  assert.equal((await context.request.post(url+'/api/simple-income',{headers,data:{description:'Tek seferlik dönem',amount:'10',frequency:'once',expected_on:nominal,status:'expected',request_key:'period-summary-once-01'}})).status(),200);
+  assert.equal((await context.request.put(url+'/api/simple-opening',{headers,data:{amount:'1000',effective_on:today,auto_income_on_due:1}})).status(),200);
+  const bank=await(await context.request.post(url+'/api/simple-payment-plans',{headers,data:{description:'Döneme ait banka',entry_kind:'regular',amount:'400',frequency:'monthly',start_on:nominal,end_on:nominal,request_key:'period-summary-bank-01'}})).json();
+  assert.equal((await context.request.post(url+`/api/simple-payments/${bank.id}/complete`,{headers,data:{scheduled_on:nominal,paid_on:today,amount:'400',request_key:'period-summary-bank-paid'}})).status(),200);
+  const refs=[];for(const [name,due,cut,payMonth,total] of [['Sonraki ay ödenecek',6,26,next,'300'],['Aynı ay ödenecek',26,16,month,'200']]){const card=await(await context.request.post(url+'/api/profile/cards',{headers,data:{bank_name:'Dönem bankası',display_name:name,payment_due_day:due,statement_closing_day:cut}})).json();refs.push(card.id);assert.equal((await context.request.put(url+'/api/simple-card-monthly-total',{headers,data:{card_ref:card.id,month:payMonth,amount:total,version:0}})).status(),200)}
+  assert.equal((await context.request.post(url+'/api/simple-card-monthly-payments',{headers,data:{card_ref:refs[1],month,amount:'200',paid_on:today,request_key:'period-summary-card-paid'}})).status(),200);
+  const endpoint=url+`/api/simple-cashflow?start=${first}&end=${nominal}`,before=await(await context.request.get(endpoint)).json();assert.equal(before.period_summary.income_expected_minor,nominal===today?'100000':'101000');assert.equal(BigInt(before.period_summary.income_received_minor)+BigInt(before.period_summary.income_expected_minor),101000n);assert.equal(BigInt(before.period_summary.payments_paid_minor)+BigInt(before.period_summary.payments_planned_minor),90000n);assert.equal(before.cash_position.projected_balance_minor,'41000');
+  await page.goto(url);await page.getByRole('heading',{name:'Gelir ve ödeme takvimi'}).waitFor();await page.locator('#overview-month').fill(month);const stats=page.locator('.monthly-stats');await stats.locator('article').nth(0).locator('strong').getByText('1.010,00 ₺',{exact:true}).waitFor();await stats.locator('article').nth(1).locator('strong').getByText('900,00 ₺',{exact:true}).waitFor();await stats.locator('article').nth(2).locator('strong').getByText('410,00 ₺',{exact:true}).waitFor();
+  assert.ok((await stats.locator('article').nth(2).innerText()).includes('Mevcut banka/nakit bakiyesi'));assert.equal(await page.locator('.planned-row').filter({hasText:'Döneme ait maaş'}).count(),0);
+  await page.locator('[data-language=en]').click();await stats.locator('article').nth(0).locator('strong').getByText('₺1,010.00',{exact:true}).waitFor();await stats.locator('article').nth(1).locator('strong').getByText('₺900.00',{exact:true}).waitFor();
+  const after=await(await context.request.get(endpoint)).json();assert.deepEqual(after.cash_position,before.cash_position);assert.deepEqual(after.income_records,before.income_records);assert.deepEqual(after.events,before.events);
+ }finally{await context.close()}
+});

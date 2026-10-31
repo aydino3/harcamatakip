@@ -131,3 +131,14 @@ test('Ay sonu gelir kaydında gerçek beklenen pazartesi gösterilir, dönem ana
  const ctx=context(async()=>response({}));ctx.record={id:1,rule_id:2,description:'Ay sonu',amount_minor:'10000',status:'expected',expected_on:'2024-03-31',display_expected_on:'2024-04-01'};
  const html=vm.runInContext("incomeManagementRow(record,'income_record')",ctx);assert.match(html,/Bekleniyor · 01.04.2024/);assert.doesNotMatch(html,/31.03.2024/);
 });
+
+test('Aylık kartlar dönem gelir/giderini kullanır; banka dahil nakit tahmini aynen korunur',()=>{
+ const ctx=context(async()=>response({}));const sample=view('70000');sample.period_summary={income_received_minor:'70000',income_expected_minor:'5860000',payments_paid_minor:'4537901',payments_planned_minor:'3430600',adjustments_minor:'0',payments_complete:true,net_minor:'-2038501'};sample.cash_position={balance_minor:'-1405901',projected_balance_minor:'-1405901'};ctx.sample=sample;
+ const monthly=vm.runInContext('summaryCards(sample,true)',ctx),overall=vm.runInContext('summaryCards(sample,false)',ctx);
+ assert.match(monthly,/59\.300,00 ₺/);assert.match(monthly,/79\.685,01 ₺/);assert.match(monthly,/Ay sonu öngörülen bakiye[\s\S]*−14\.059,01 ₺/);assert.match(monthly,/Mevcut banka\/nakit bakiyesi \+/);assert.match(monthly,/Ait olduğu aya göre/);assert.doesNotMatch(overall,/59\.300,00 ₺/);assert.match(overall,/700,00 ₺/);
+});
+
+test('Eksik ekstre ve başlangıç bakiyesinde dönem farkı kesin kalan para gibi gösterilmez',()=>{
+ const ctx=context(async()=>response({}));const sample=view('10000');sample.period_summary={income_received_minor:'0',income_expected_minor:'10000',payments_paid_minor:'0',payments_planned_minor:'0',adjustments_minor:'0',payments_complete:false,net_minor:'10000'};sample.cash_position={projected_balance_minor:null};ctx.sample=sample;
+ const html=vm.runInContext('summaryCards(sample,true)',ctx);assert.match(html,/Bilinen aylık ödemeler/);assert.match(html,/Eksik ekstre veya kart bağlantısı var/);assert.match(html,/Aylık kalan<\/span><strong>Eksik bilgi/);
+});

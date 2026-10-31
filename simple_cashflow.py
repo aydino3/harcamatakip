@@ -82,12 +82,14 @@ def income_record_expected_date(data, record):
     return core.income_expected_date(rule, record["expected_on"])
 
 
-def income_events(data,start_value,end_value,as_of):
+def income_events(data,start_value,end_value,as_of,*,by_period=False):
     start,end=date.fromisoformat(start_value),date.fromisoformat(end_value)
     events=[]
     def add(key,when,amount,description,kind,status,**extra):
-        if start_value<=when<=end_value:
-            events.append({"id":key,"date":when,"amount_minor":int(amount),"description":description,"kind":kind,"status":status,**extra})
+        period_on=extra.get("scheduled_on") or extra.get("expected_on") or when
+        selected=period_on if by_period else when
+        if start_value<=selected<=end_value:
+            events.append({"id":key,"date":when,"amount_minor":int(amount),"description":description,"kind":kind,"status":status,**extra,**({"period_on":period_on} if by_period else {})})
     automatic=bool((data.get('opening') or {}).get('auto_income_on_due'))
     actual_income_keys=set(tuple(key) for key in data.get('suppressed_income_keys',[]))
     rules={row["id"]:row for row in data["income_rules"]}
@@ -124,16 +126,25 @@ def income_events(data,start_value,end_value,as_of):
     return events
 
 
-def calculate(data,start_value,end_value,as_of=None):
+def calculate(data,start_value,end_value,as_of=None,*,bank_payment_period=False):
     as_of=as_of or today()
     start,end=date.fromisoformat(start_value),date.fromisoformat(end_value)
     if start.isoformat()!=start_value or end.isoformat()!=end_value or end<start or (end-start).days>3660:
         raise ValueError("Tarih aralığını kontrol edin; en fazla 10 yıl seçilebilir.")
     events=[]
+    bank_rules={row["id"] for row in data["recurring"] if not row.get("card_ref") and row.get("entry_kind")=="regular"} if bank_payment_period else set()
     def add(key,when,amount,description,kind,status,**extra):
-        if start_value<=when<=end_value:
-            events.append({"id":key,"date":when,"amount_minor":int(amount),"description":description,"kind":kind,"status":status,**extra})
-    events.extend(income_events(data,start_value,end_value,as_of))
+        period_on=extra.get("scheduled_on") or when
+        if bank_payment_period:
+            if kind!="payment" or extra.get("statement_id") or key.startswith("repayment:"):
+                return
+            if extra.get("recurring_id") is not None and extra["recurring_id"] not in bank_rules:
+                return
+        selected=period_on if bank_payment_period else when
+        if start_value<=selected<=end_value:
+            events.append({"id":key,"date":when,"amount_minor":int(amount),"description":description,"kind":kind,"status":status,**extra,**({"period_on":period_on} if bank_payment_period else {})})
+    if not bank_payment_period:
+        events.extend(income_events(data,start_value,end_value,as_of))
     expenses={row["id"]:row for row in data["expenses"]}
     completed={}
     linked_expenses=set()
@@ -169,7 +180,8 @@ def calculate(data,start_value,end_value,as_of=None):
     for statement in statement_balances(data):
         if statement['remaining_minor']:
             add(f"statement:{statement['id']}",statement['due_on'],statement['remaining_minor'],statement['description'],'payment','overdue' if statement['due_on']<as_of.isoformat() else 'planned',statement_id=statement['id'],card_id=statement['card_id'],scheduled_on=statement['payment_month']+'-01')
-    events=apply_monthly_card_totals(data,events,start_value,end_value,as_of)
+    if not bank_payment_period:
+        events=apply_monthly_card_totals(data,events,start_value,end_value,as_of)
     for index,row in enumerate(data["adjustments"]):
         add(f"adjustment:{index}",row["adjustment_on"],row["amount_minor"],row.get("description","Bakiye düzeltmesi"),"adjustment","completed")
     events.sort(key=lambda row:(row["date"],0 if row["kind"]=="income" else 1,row["id"]))
@@ -188,7 +200,7 @@ def calculate(data,start_value,end_value,as_of=None):
         running+=signed
         event["net_after_minor"]=running
         event["cash_effect_minor"]=signed
-    return {"start_on":start_value,"end_on":end_value,"as_of":as_of.isoformat(),"events":events,"totals":totals,"net_minor":running,"opening":data["opening"],"balance_is_confirmed":False,"basis":"entered_payment_dates"}
+    return {"start_on":start_value,"end_on":end_value,"as_of":as_of.isoformat(),"events":events,"totals":totals,"net_minor":running,"opening":data["opening"],"balance_is_confirmed":False,"basis":"bank_payment_period" if bank_payment_period else "entered_payment_dates"}
 
 
 def overview(user_id,start_value,end_value):
@@ -206,6 +218,7 @@ def overview(user_id,start_value,end_value):
     result['extra_budget']=extra_budget(data,result,start_value,end_value)
     result['card_monthly_debt']=monthly_card_debt(data,start_value[:7])
     result['card_statement_spending']=card_statement_spending(data,start_value[:7])
+    result['period_summary']=monthly_period_summary(data,start_value[:7],cards=result['card_statement_spending'])
     covered={(row['card_ref'],row['month']) for row in data.get('card_monthly_totals',[])}
     result['statements']=[{**row,'covered_by_monthly_total':('legacy:'+str(row['card_id']),row['payment_month']) in covered,**{k:str(row[k]) for k in ('total_minor','paid_minor','remaining_minor')}} for row in statement_balances(data)]
     result["net_minor"]=str(result["net_minor"])
@@ -737,7 +750,7 @@ def monthly_card_debt(data,month):
         planned=sum(int(rule['amount_minor']) for rule in data.get('recurring',[]) if rule['status']=='active' and rule.get('card_ref')==ref for _ in payment_dates(rule,first,last))
         gross=int(manual['amount_minor']) if manual else sum(int(row['total_minor']) for row in known)+planned if known else None
         parts=fixed[ref];extra=gross-sum(parts.values()) if gross is not None else None
-        rows.append({'card_ref':ref,'bank_name':card['bank_name'],'display_name':card['display_name'],'version':manual['version'] if manual else 0,'source_month':manual['month'] if manual else month,'configured_due_on':configured_card_due(data,ref,month),'payment_due_day':card_schedule.due_day(configured_card(data,ref)),'due_day_offset':monthly_due_offset(data,manual) if manual else 0,'due_date_explicit':manual.get('due_date_explicit',0) if manual else 0,'due_on':balances.get((ref,month),{}).get('due_on') or configured_card_due(data,ref,month),'remaining_minor':str(balances[(ref,month)]['remaining_minor']) if (ref,month) in balances else None,'source':'entered' if manual else 'statement' if known else 'missing','total_minor':str(gross) if gross is not None else None,**{key:str(value) for key,value in parts.items()},'extra_minor':str(extra) if extra is not None and extra>=0 else None,'inconsistent':extra is not None and extra<0})
+        rows.append({'card_ref':ref,'bank_name':card['bank_name'],'display_name':card['display_name'],'version':manual['version'] if manual else 0,'source_month':manual['month'] if manual else month,'configured_due_on':configured_card_due(data,ref,month),'payment_due_day':card_schedule.due_day(configured_card(data,ref)),'due_day_offset':monthly_due_offset(data,manual) if manual else 0,'due_date_explicit':manual.get('due_date_explicit',0) if manual else 0,'due_on':balances.get((ref,month),{}).get('due_on') or configured_card_due(data,ref,month),'remaining_minor':str(balances[(ref,month)]['remaining_minor']) if (ref,month) in balances else None,'source':'entered' if manual else 'statement' if known else 'missing','paid_minor':str(min(gross,card_paid_minor(data,ref,month,statements))) if gross is not None else None,'total_minor':str(gross) if gross is not None else None,**{key:str(value) for key,value in parts.items()},'extra_minor':str(extra) if extra is not None and extra>=0 else None,'inconsistent':extra is not None and extra<0})
     return {'month':month,'cards':rows,'unassigned_installments':unassigned,'extra_minor':str(sum(int(row['extra_minor']) for row in rows if row['extra_minor'] is not None)),'complete':all(row['total_minor'] is not None and not row['inconsistent'] for row in rows) and not unassigned}
 
 
@@ -775,11 +788,27 @@ def card_statement_spending(data,month):
     unassigned={row['id']:row for candidate in (month,card_schedule.shift_month(month,1)) for row in debts(candidate)['unassigned_installments']}
     bank_fixed=sum(int(rule['amount_minor']) for rule in data.get('recurring',[]) if rule['status']=='active' and rule.get('entry_kind')=='regular' and not rule.get('card_ref') for _ in payment_dates(rule,first,last))
     card_fixed=sum(int(row['installment_minor'])+int(row['regular_minor']) for row in rows)
-    view=calculate(data,first.isoformat(),last.isoformat())
-    income=int(view['totals']['income_received_minor'])+int(view['totals']['income_expected_minor'])
+    income=sum(row['amount_minor'] for row in income_events(data,first.isoformat(),last.isoformat(),today(),by_period=True))
     known_total=sum(int(row['total_minor']) for row in rows if row['total_minor'] is not None)
     extras=sum(int(row['extra_minor']) for row in rows if row['extra_minor'] is not None)
     return {'month':month,'basis':'statement_closing_month','cards':rows,'unassigned_installments':list(unassigned.values()),'total_minor':str(known_total),'installment_minor':str(sum(int(row['installment_minor']) for row in rows)),'regular_minor':str(sum(int(row['regular_minor']) for row in rows)),'extra_minor':str(extras),'complete':all(row['extra_minor'] is not None and not row['inconsistent'] for row in rows) and not unassigned,'budget':{'income_minor':str(income),'fixed_minor':str(bank_fixed+card_fixed),'bank_fixed_minor':str(bank_fixed),'allowance_minor':str(max(0,income-bank_fixed-card_fixed)) if all(not row['missing_closing_day'] and not row['inconsistent'] for row in rows) and not unassigned else None}}
+
+
+def monthly_period_summary(data,month,as_of=None,cards=None):
+    """Monthly reporting attribution; never used to recognize or project bank cash."""
+    from calendar import monthrange
+    as_of=as_of or today()
+    first=date.fromisoformat(month+'-01');last=first.replace(day=monthrange(first.year,first.month)[1])
+    income=income_events(data,first.isoformat(),last.isoformat(),as_of,by_period=True)
+    bank=calculate(data,first.isoformat(),last.isoformat(),as_of,bank_payment_period=True)
+    cards=card_statement_spending(data,month) if cards is None else cards
+    card_total=sum(int(row['total_minor']) for row in cards['cards'] if row['total_minor'] is not None)
+    card_paid=sum(int(row.get('paid_minor') or 0) for row in cards['cards'] if row['total_minor'] is not None)
+    received=sum(row['amount_minor'] for row in income if row['status']=='received')
+    expected=sum(row['amount_minor'] for row in income if row['status']!='received')
+    paid=int(bank['totals']['payments_paid_minor'])+card_paid
+    planned=int(bank['totals']['payments_planned_minor'])+card_total-card_paid
+    return {'month':month,'basis':'income_period_and_statement_closing_month','income_received_minor':str(received),'income_expected_minor':str(expected),'payments_paid_minor':str(paid),'payments_planned_minor':str(planned),'adjustments_minor':'0','payments_complete':cards['complete'],'net_minor':str(received+expected-paid-planned)}
 
 
 def save_card_monthly_total(user_id,payload):
@@ -858,9 +887,19 @@ def monthly_due_offset(data,total):
     return offset
 
 
-def monthly_total_balances(data):
+def card_paid_minor(data,ref,month,statements=None):
     rules={row['id']:row for row in data.get('recurring',[])}
     expenses={row['id']:row for row in data.get('expenses',[])}
+    statements=statement_balances(data) if statements is None else statements
+    def covered(rule_id,scheduled):return rules.get(rule_id,{}).get('card_ref')==ref and scheduled[:7]==month
+    paid=sum(int(row['amount_minor']) for row in data.get('payment_events',[]) if covered(row['recurring_id'],row['scheduled_on']))
+    paid+=sum(int(expenses[row['expense_id']]['amount_minor']) for row in data.get('occurrences',[]) if row.get('expense_id') in expenses and covered(row['recurring_id'],row['scheduled_on']))
+    paid+=sum(int(row['paid_minor']) for row in statements if 'legacy:'+str(row['card_id'])==ref and row.get('payment_month',row['due_on'][:7])==month)
+    paid+=sum(int(row['amount_minor']) for row in data.get('card_monthly_payments',[]) if row['card_ref']==ref and row['month']==month)
+    return paid
+
+
+def monthly_total_balances(data):
     statements=statement_balances(data);result=[]
     for total in data.get('card_monthly_totals',[]):
         ref,month=total['card_ref'],total['month']
@@ -868,11 +907,7 @@ def monthly_total_balances(data):
         if due:due=card_due_for_month(configured_card(data,ref),month,monthly_due_offset(data,total))
         else:due=total.get('due_on')
         if not due:continue
-        def covered(rule_id,scheduled):return rules.get(rule_id,{}).get('card_ref')==ref and scheduled[:7]==month
-        paid=sum(int(row['amount_minor']) for row in data.get('payment_events',[]) if covered(row['recurring_id'],row['scheduled_on']))
-        paid+=sum(int(expenses[row['expense_id']]['amount_minor']) for row in data.get('occurrences',[]) if row.get('expense_id') in expenses and covered(row['recurring_id'],row['scheduled_on']))
-        paid+=sum(int(row['paid_minor']) for row in statements if 'legacy:'+str(row['card_id'])==ref and row.get('payment_month',row['due_on'][:7])==month)
-        paid+=sum(int(row['amount_minor']) for row in data.get('card_monthly_payments',[]) if row['card_ref']==ref and row['month']==month)
+        paid=card_paid_minor(data,ref,month,statements)
         gross=int(total['amount_minor'])
         card=next((card for card in data.get('cards' if ref.startswith('legacy:') else 'profile_cards',[]) if str(card['id'])==ref.split(':')[1]),{})
         result.append({**total,'due_on':due,'description':(card.get('display_name') or 'Kart')+' · Aylık kart borcu','paid_minor':paid,'remaining_minor':max(0,gross-paid)})
