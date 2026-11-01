@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import hmac
 import ipaddress
 import os
@@ -10,15 +11,21 @@ import traceback
 from datetime import date
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory, redirect
 from werkzeug.exceptions import HTTPException
 
 import app as core
 import privacy_notice as privacy
 
+PAGE_ROUTES={
+    'tr':{'genel-bakis':'overview','odemelerim':'payments','gelirlerim':'income','profil-ve-ayarlar':'profile','tavsiyeler':'recommendations'},
+    'en':{'overview':'overview','payments':'payments','income':'income','profile':'profile','recommendations':'recommendations'},
+}
+
 
 def create_app(test_config: dict | None = None) -> Flask:
     web = Flask(__name__, static_folder=None)
+    asset_hashes={name:hashlib.sha256((core.ROOT/'static'/name).read_bytes()).hexdigest() for name in ('app.js','locale.js','theme.js','style.css')}
     web.config.update(MAX_CONTENT_LENGTH=core.MAX_CSV_BYTES + 64_000, TESTING=False)
     web.config["TRUST_PROXY"] = os.environ.get("TRUST_PROXY", "0") == "1"
     production = os.environ.get("APP_ENV", "development").strip().lower() == "production"
@@ -84,7 +91,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'"
-        if request.path.startswith("/api/") or request.path == "/":
+        if request.path.startswith("/api/") or response.mimetype == "text/html":
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -518,13 +525,32 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     @web.get("/")
     def index_route():
-        return send_from_directory(core.ROOT / "static", "index.html")
+        html=(core.ROOT/'static'/'index.html').read_text(encoding='utf-8')
+        for name,digest in asset_hashes.items():
+            html=html.replace('"/static/'+name+'"','"/static/'+name+'?v='+digest[:16]+'"')
+        return Response(html,content_type='text/html; charset=utf-8')
+
+    @web.get('/<language>/<slug>')
+    def localized_page(language,slug):
+        if slug not in PAGE_ROUTES.get(language,{}):return json_error('Bulunamadı.',404)
+        response=index_route()
+        response.set_data(response.get_data(as_text=True).replace('<html lang="tr">','<html lang="'+language+'">'))
+        return response
+
+    @web.get('/<language>')
+    @web.get('/<language>/')
+    def locale_root(language):
+        if language not in PAGE_ROUTES:return json_error('Bulunamadı.',404)
+        return redirect('/'+language+'/'+next(iter(PAGE_ROUTES[language])),code=302)
 
     @web.get("/static/<path:filename>")
     def static_route(filename):
-        response = send_from_directory(core.ROOT / "static", filename)
+        response = send_from_directory(core.ROOT / "static", filename,conditional=False)
+        digest=asset_hashes.get(filename) or hashlib.sha256((core.ROOT/'static'/filename).read_bytes()).hexdigest()
+        response.set_etag(digest)
+        response.headers.pop('Last-Modified',None)
         response.headers["Cache-Control"] = "no-cache"
-        return response
+        return response.make_conditional(request)
 
     @web.post("/api/register")
     @web.post("/api/login")

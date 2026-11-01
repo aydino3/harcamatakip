@@ -27,8 +27,8 @@ export async function start(snapshot,root,python,reviewUrl,port=0){
     if(!await authenticated(cookie))return json(403,{error:'Bu çalışma kopyası giriş yaptığınız hesaba ait değil.'});
     res.setHeader('Set-Cookie',cookies);return json(200,{csrf,local_sandbox:true});
    }
-   if(method==='GET'&&(target.pathname==='/'||target.pathname.startsWith('/static/'))){
-    const file=target.pathname==='/'?path.join(root,'static/index.html'):path.resolve(root,'.'+target.pathname);
+   if(method==='GET'&&(target.pathname==='/'||/^\/(?:tr\/(?:genel-bakis|odemelerim|gelirlerim|profil-ve-ayarlar|tavsiyeler)|en\/(?:overview|payments|income|profile|recommendations))$/.test(target.pathname)||target.pathname.startsWith('/static/'))){
+    const file=!target.pathname.startsWith('/static/')?path.join(root,'static/index.html'):path.resolve(root,'.'+target.pathname);
     if(!file.startsWith(path.join(root,'static')+path.sep))return json(404,{});
     res.writeHead(200,{'Content-Type':file.endsWith('.js')?'text/javascript; charset=utf-8':file.endsWith('.css')?'text/css; charset=utf-8':file.endsWith('.html')?'text/html; charset=utf-8':file.endsWith('.woff2')?'font/woff2':'application/octet-stream'});return res.end(await fs.readFile(file));
    }

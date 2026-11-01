@@ -158,3 +158,12 @@ test('Tamamlanan eski dönem bugünkü banka parasıyla sahte kapanış gösterm
  const ctx=context(async()=>response({}));const sample=view('0');sample.period_summary={income_received_minor:'0',income_expected_minor:'0',payments_paid_minor:'0',payments_planned_minor:'0',adjustments_minor:'0',payments_complete:true,net_minor:'0',projection:{configured:true,complete:true,period_ended:true,unavailable_reason:'historical',projected_balance_minor:null}};ctx.sample=sample;
  const html=vm.runInContext('summaryCards(sample,true)',ctx);assert.match(html,/<strong>Tamamlandı<\/strong>/);assert.doesNotMatch(html,/Eksik bilgi/);
 });
+
+test('Türkçe ve English bölüm adresleri ayrıdır; eski hash aynı bölümü korur',()=>{
+ const ctx=context(async()=>response({}));
+ for(const [section,tr] of Object.entries({overview:'genel-bakis',payments:'odemelerim',income:'gelirlerim',profile:'profil-ve-ayarlar',recommendations:'tavsiyeler'})){
+  assert.equal(vm.runInContext(`sectionUrl('${section}','tr')`,ctx),'/tr/'+tr);assert.equal(vm.runInContext(`sectionUrl('${section}','en')`,ctx),'/en/'+section);
+  assert.equal(vm.runInContext(`routeFromLocation('/tr/${tr}','').section`,ctx),section);assert.equal(vm.runInContext(`routeFromLocation('/en/${section}','').language`,ctx),'en');assert.equal(vm.runInContext(`routeFromLocation('/','#${section}').section`,ctx),section);
+ }
+ assert.equal(vm.runInContext("routeFromLocation('/tr/not-a-page','')",ctx),null);assert.equal(vm.runInContext("routeFromLocation('/__proto__/overview','')",ctx),null);
+});
