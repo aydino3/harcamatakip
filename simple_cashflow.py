@@ -765,6 +765,11 @@ def monthly_card_debt(data,month):
         gross=int(manual['amount_minor']) if manual else sum(int(row['total_minor']) for row in known)+planned if known else None
         parts=fixed[ref];extra=gross-sum(parts.values()) if gross is not None else None
         rows.append({'card_ref':ref,'bank_name':card['bank_name'],'display_name':card['display_name'],'version':manual['version'] if manual else 0,'source_month':manual['month'] if manual else month,'configured_due_on':configured_card_due(data,ref,month),'payment_due_day':card_schedule.due_day(configured_card(data,ref)),'due_day_offset':monthly_due_offset(data,manual) if manual else 0,'due_date_explicit':manual.get('due_date_explicit',0) if manual else 0,'due_on':balances.get((ref,month),{}).get('due_on') or configured_card_due(data,ref,month),'remaining_minor':str(balances[(ref,month)]['remaining_minor']) if (ref,month) in balances else None,'source':'entered' if manual else 'statement' if known else 'missing','paid_minor':str(min(gross,card_paid_minor(data,ref,month,statements))) if gross is not None else None,'total_minor':str(gross) if gross is not None else None,**{key:str(value) for key,value in parts.items()},'extra_minor':str(extra) if extra is not None and extra>=0 else None,'inconsistent':extra is not None and extra<0})
+        # An absent statement total does not erase already recorded obligations.
+        # Once entered, the statement replaces this subtotal rather than adding to it.
+        extras=sum(int(rule['amount_minor']) for rule in data.get('recurring',[]) if rule['status']=='active' and rule.get('card_ref')==ref and rule.get('entry_kind')=='expense' for _ in payment_dates(rule,first,last))
+        known=gross if gross is not None else sum(parts.values())+extras
+        rows[-1].update(known_total_minor=str(known),known_paid_minor=str(min(known,card_paid_minor(data,ref,month,statements))))
     return {'month':month,'cards':rows,'unassigned_installments':unassigned,'extra_minor':str(sum(int(row['extra_minor']) for row in rows if row['extra_minor'] is not None)),'complete':all(row['total_minor'] is not None and not row['inconsistent'] for row in rows) and not unassigned}
 
 
@@ -808,6 +813,13 @@ def card_statement_spending(data,month):
     return {'month':month,'basis':'statement_closing_month','cards':rows,'unassigned_installments':list(unassigned.values()),'total_minor':str(known_total),'installment_minor':str(sum(int(row['installment_minor']) for row in rows)),'regular_minor':str(sum(int(row['regular_minor']) for row in rows)),'extra_minor':str(extras),'complete':all(row['extra_minor'] is not None and not row['inconsistent'] for row in rows) and not unassigned,'budget':{'income_minor':str(income),'fixed_minor':str(bank_fixed+card_fixed),'bank_fixed_minor':str(bank_fixed),'allowance_minor':str(max(0,income-bank_fixed-card_fixed)) if all(not row['missing_closing_day'] and not row['inconsistent'] for row in rows) and not unassigned else None}}
 
 
+def reported_card_amounts(row):
+    """Known obligations, with an entered statement as the authoritative total."""
+    total=int(row['total_minor']) if row['total_minor'] is not None else int(row.get('known_total_minor',0))
+    paid=min(total,int(row.get('paid_minor') or row.get('known_paid_minor') or 0))
+    return total,paid
+
+
 def monthly_period_summary(data,month,as_of=None,cards=None):
     """Monthly reporting attribution; never used to recognize or project bank cash."""
     from calendar import monthrange
@@ -816,8 +828,9 @@ def monthly_period_summary(data,month,as_of=None,cards=None):
     income=income_events(data,first.isoformat(),last.isoformat(),as_of,by_period=True)
     bank=calculate(data,first.isoformat(),last.isoformat(),as_of,bank_payment_period=True)
     cards=card_statement_spending(data,month) if cards is None else cards
-    card_total=sum(int(row['total_minor']) for row in cards['cards'] if row['total_minor'] is not None)
-    card_paid=sum(int(row.get('paid_minor') or 0) for row in cards['cards'] if row['total_minor'] is not None)
+    amounts=[reported_card_amounts(row) for row in cards['cards']]
+    card_total=sum(total for total,paid in amounts)
+    card_paid=sum(paid for total,paid in amounts)
     received=sum(row['amount_minor'] for row in income if row['status']=='received')
     expected=sum(row['amount_minor'] for row in income if row['status']!='received')
     paid=int(bank['totals']['payments_paid_minor'])+card_paid
@@ -860,9 +873,9 @@ def period_projected_balance(data,month,as_of=None,cards=None):
         for row in report['cards']:
             if row['total_minor'] is None:
                 if int(row['installment_minor'])+int(row['regular_minor']):complete=False
-                continue
             if row['inconsistent']:complete=False
-            pending_payments+=max(0,int(row['total_minor'])-int(row.get('paid_minor') or 0))
+            total,paid=reported_card_amounts(row)
+            pending_payments+=max(0,total-paid)
         candidate=card_schedule.shift_month(candidate,1)
     result.update(pending_income_minor=str(pending_income),pending_payments_minor=str(pending_payments),complete=complete)
     if end<as_of and not pending_income and not pending_payments:

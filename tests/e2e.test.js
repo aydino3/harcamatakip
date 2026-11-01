@@ -170,3 +170,18 @@ test('Yerelleştirilmiş adresler, eski hash, yenileme ve geri/ileri aynı böl�
   const profile=await(await context.request.get(url+'/api/profile')).json();assert.equal(profile.username,'routes-e2e');
  }finally{await context.close()}
 });
+
+test('Eksik ekstrede Aralık vadeli taksit Kasım planlananına girer; ekstre girilince iki kez sayılmaz',async()=>{
+ const context=await browser.newContext();const page=await context.newPage();
+ try{
+  const auth=await(await context.request.post(url+'/api/register',{data:{email:'known-plans-e2e@example.invalid',username:'known-plans-e2e',password:'synthetic-known-plans-password'}})).json(),headers={'X-CSRF-Token':auth.csrf};
+  const card=await(await context.request.post(url+'/api/profile/cards',{headers,data:{bank_name:'Sentetik banka',display_name:'Kasım kesimli kart',payment_due_day:9,statement_closing_day:28}})).json();
+  assert.equal((await context.request.post(url+'/api/simple-payment-plans',{headers,data:{description:'Aralık vadeli taksit',entry_kind:'installment',card_ref:card.id,amount:'109.38',frequency:'monthly',start_on:'2030-12-09',end_on:'2031-01-09',request_key:'known-plans-e2e-0001'}})).status(),200);
+  await page.goto(url);await page.locator('#overview-month').fill('2030-11');
+  const stats=page.locator('.monthly-stats');await stats.locator('article').nth(1).locator('strong').getByText('109,38 ₺',{exact:true}).waitFor();
+  await stats.locator('article').nth(1).getByText('Bilinen aylık ödemeler',{exact:true}).waitFor();
+  await page.locator('nav [data-section=payments]').click();await page.locator('#spending-month').fill('2030-11');
+  const row=page.locator('.card-spending').filter({hasText:'Kasım kesimli kart'});await row.locator('[name=amount]').fill('300');await row.getByRole('button',{name:'Borcu kaydet',exact:true}).click();await page.locator('#success').getByText('Aylık kart borcu kaydedildi.',{exact:true}).waitFor();
+  await page.locator('nav [data-section=overview]').click();await stats.locator('article').nth(1).locator('strong').getByText('300,00 ₺',{exact:true}).waitFor();
+ }finally{await context.close()}
+});
