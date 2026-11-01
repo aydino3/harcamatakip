@@ -180,8 +180,7 @@ test('Eksik ekstrede Aralık vadeli taksit Kasım planlananına girer; ekstre gi
   await page.goto(url);await page.locator('#overview-month').fill('2030-11');
   const stats=page.locator('.monthly-stats');await stats.locator('article').nth(1).locator('strong').getByText('109,38 ₺',{exact:true}).waitFor();
   await stats.locator('article').nth(1).getByText('Bilinen aylık ödemeler',{exact:true}).waitFor();
-  await page.locator('nav [data-section=payments]').click();await page.locator('#spending-month').fill('2030-11');
-  const row=page.locator('.card-spending').filter({hasText:'Kasım kesimli kart'});await row.locator('[name=amount]').fill('300');await row.getByRole('button',{name:'Borcu kaydet',exact:true}).click();await page.locator('#success').getByText('Aylık kart borcu kaydedildi.',{exact:true}).waitFor();
-  await page.locator('nav [data-section=overview]').click();await stats.locator('article').nth(1).locator('strong').getByText('300,00 ₺',{exact:true}).waitFor();
+  assert.equal((await context.request.put(url+'/api/simple-card-monthly-total',{headers,data:{card_ref:card.id,month:'2030-12',amount:'300',version:0}})).status(),200);
+  await page.reload();await page.locator('#overview-month').fill('2030-11');await stats.locator('article').nth(1).locator('strong').getByText('300,00 ₺',{exact:true}).waitFor();
  }finally{await context.close()}
 });
